@@ -14,6 +14,7 @@ type Config struct {
 	Pipeline PipelineConfig `mapstructure:"pipeline"`
 	WAL      WALConfig      `mapstructure:"wal"`
 	UI       UIConfig       `mapstructure:"ui"`
+	Server   ServerConfig   `mapstructure:"server"`
 	Sinks    []SinkConfig   `mapstructure:"sinks"`
 }
 
@@ -48,6 +49,12 @@ type WALConfig struct {
 type UIConfig struct {
 	Enabled bool `mapstructure:"enabled"`
 	Port    int  `mapstructure:"port"`
+}
+
+// ServerConfig holds gRPC + REST gateway configuration.
+type ServerConfig struct {
+	GRPCPort int `mapstructure:"grpc_port"`
+	HTTPPort int `mapstructure:"http_port"`
 }
 
 // SinkConfig holds the configuration for the CDC sink.
@@ -115,6 +122,12 @@ func (c *Config) applyDefaults() {
 	}
 	if c.UI.Port <= 0 {
 		c.UI.Port = 8080
+	}
+	if c.Server.GRPCPort <= 0 {
+		c.Server.GRPCPort = 9090
+	}
+	if c.Server.HTTPPort <= 0 {
+		c.Server.HTTPPort = 8080
 	}
 	for i := range c.Sinks {
 		if c.Sinks[i].BatchSize <= 0 {

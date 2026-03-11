@@ -1,7 +1,7 @@
 package pipeline
 
 import (
-	"hash/fnv"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -13,11 +13,8 @@ import (
 )
 
 const (
-	_nameWorkerID   = "worker_id"
 	_nameErr        = "err"
-	_nameWorkers    = "workers"
 	_nameBufferSize = "buffer_size"
-
 	// How many events the worker tries to pull from the WAL in one go
 	_batchSize = 100
 )
@@ -70,28 +67,15 @@ func (e *Engine) Start() error {
 	return e.source.Start(e.eventCh, e.ackCh)
 }
 
-func hashPartition(table, key string, numPartitions int) int {
-	h := fnv.New32a()
-	h.Write([]byte(table))
-	h.Write([]byte(key))
-	// Prevent negative hash
-	val := int(h.Sum32())
-	if val < 0 {
-		val = -val
-	}
-	return val % numPartitions
-}
-
 // producer consumes from eventCh (from Source) and pushes to right partition WAL
 func (e *Engine) producer() {
 	defer e.wg.Done()
 	slog.Debug("pipeline producer started")
 
 	for ev := range e.eventCh {
-		partID := hashPartition(ev.Database, ev.Table, e.partitionCount)
-
-		if err := e.manager.Enqueue(partID, ev); err != nil {
-			slog.Error("failed to enqueue to WAL partition", "partition", partID, _nameErr, err)
+		key := fmt.Sprintf("%s.%s", ev.Database, ev.Table)
+		if err := e.manager.Enqueue([]byte(key), ev); err != nil {
+			slog.Error("failed to enqueue to WAL partition", _nameErr, err)
 		}
 	}
 	slog.Debug("pipeline producer exited")
@@ -126,7 +110,8 @@ func (e *Engine) worker(partID int) {
 			// Process events sequentially in this partition worker
 			var hasError bool
 			var highestLSN uint64
-			for _, ev := range events {
+			for _, walMsg := range events {
+				ev := walMsg.Item
 				for _, s := range e.sinks {
 					if err := s.Write(ev); err != nil {
 						slog.Error("sink write error", "partition_id", partID, _nameErr, err)

@@ -1,0 +1,181 @@
+syntax = "proto3";
+
+package cdc.v1;
+
+option go_package = "github.com/foden/cdc/api/proto/v1;cdcpb";
+
+import "google/api/annotations.proto";
+
+//  CDC Service — Kafka-UI–style APIs for the CDC queue system.
+service CDCService {
+
+  //  Topics
+  rpc ListTopics(ListTopicsRequest) returns (ListTopicsResponse) {
+    option (google.api.http) = {
+      get : "/api/v1/topics"
+    };
+  }
+
+  rpc GetTopic(GetTopicRequest) returns (TopicDetail) {
+    option (google.api.http) = {
+      get : "/api/v1/topics/{name}"
+    };
+  }
+
+  //  Partitions
+  rpc ListPartitions(ListPartitionsRequest) returns (ListPartitionsResponse) {
+    option (google.api.http) = {
+      get : "/api/v1/partitions"
+    };
+  }
+
+  rpc GetPartition(GetPartitionRequest) returns (PartitionDetail) {
+    option (google.api.http) = {
+      get : "/api/v1/partitions/{id}"
+    };
+  }
+
+  //  Messages
+  rpc GetMessages(GetMessagesRequest) returns (GetMessagesResponse) {
+    option (google.api.http) = {
+      get : "/api/v1/messages"
+    };
+  }
+
+  //  Stats / Health
+  rpc GetStats(GetStatsRequest) returns (StatsResponse) {
+    option (google.api.http) = {
+      get : "/api/v1/stats"
+    };
+  }
+
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse) {
+    option (google.api.http) = {
+      get : "/api/v1/health"
+    };
+  }
+
+  rpc GetConfig(GetConfigRequest) returns (GetConfigResponse) {
+    option (google.api.http) = {
+      get : "/api/v1/config"
+    };
+  }
+}
+
+//  Topics
+message ListTopicsRequest {}
+
+message ListTopicsResponse { repeated TopicSummary topics = 1; }
+
+message TopicSummary {
+  string name = 1;
+  int32 partition_count = 2;
+  uint64 message_count = 3;
+}
+
+message GetTopicRequest { string name = 1; }
+
+message TopicDetail {
+  string name = 1;
+  int32 partition_count = 2;
+  uint64 message_count = 3;
+  repeated PartitionSummary partitions = 4;
+}
+
+//  Partitions
+message ListPartitionsRequest {
+  string topic = 1; // optional filter by topic
+}
+
+message ListPartitionsResponse { repeated PartitionSummary partitions = 1; }
+
+message PartitionSummary {
+  int32 id = 1;
+  int64 size_bytes = 2;
+  int32 segment_count = 3;
+  uint64 earliest_offset = 4;
+  uint64 latest_offset = 5;
+}
+
+message GetPartitionRequest {
+  string topic = 1; // topic key (e.g. "db.table")
+  int32 id = 2;
+}
+
+message PartitionDetail {
+  int32 id = 1;
+  int64 size_bytes = 2;
+  int32 segment_count = 3;
+  uint64 earliest_offset = 4;
+  uint64 latest_offset = 5;
+  repeated SegmentInfo segments = 6;
+}
+
+message SegmentInfo {
+  uint64 base_offset = 1;
+  int64 size_bytes = 2;
+}
+
+//  Messages
+message GetMessagesRequest {
+  optional int32 partition_id = 1;
+  uint64 offset = 2; // start reading from this offset
+  int32 limit = 3;   // max messages to return (default 50)
+}
+
+message GetMessagesResponse { repeated MessageItem messages = 1; }
+
+message MessageItem {
+  uint64 offset = 1;
+  int64 timestamp = 2;
+  string key = 3;
+  bytes value = 4;
+}
+
+//  Stats / Health
+message GetStatsRequest {}
+
+message StatsResponse {
+  uint64 total_enqueued = 1;
+  uint64 total_dequeued = 2;
+  uint64 pending = 3;
+  int32 segments_count = 4;
+  int64 total_size_mb = 5;
+  int32 partition_count = 6;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  string status = 1; // "ok"
+  string version = 2;
+  int64 uptime = 3; // seconds since start
+}
+message GetConfigRequest {}
+
+message GetConfigResponse {
+  AppConfig config = 1;
+  repeated string available_sources = 2;
+  repeated string available_sinks = 3;
+}
+
+message AppConfig {
+  string name = 1;
+  string log_mode = 2;
+  SourceConfig source = 3;
+  repeated SinkConfig sinks = 4;
+}
+
+message SourceConfig {
+  string type = 1;
+  string host = 2;
+  int32 port = 3;
+  string database = 4;
+  repeated string tables = 5;
+}
+
+message SinkConfig {
+  string type = 1;
+  repeated string url = 2;
+  string index_prefix = 3;
+}

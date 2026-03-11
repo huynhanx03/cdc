@@ -2,146 +2,183 @@ package queue
 
 import (
 	"encoding/binary"
-	"errors"
-	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
-	"path/filepath"
 	"sync"
+	"syscall"
 )
 
-var (
-	ErrClosed = errors.New("segment is closed")
+const (
+	_defaultIndexInterval = 4096
 )
 
-// Segment represents a single append-only file on disk.
 type Segment struct {
-	mu     sync.RWMutex
-	file   *os.File
-	path   string
-	size   int64
-	closed bool
+	mu sync.RWMutex
+
+	logFile       *os.File
+	indexFile     *os.File
+	timeIndexFile *os.File
+
+	mmap []byte
+
+	baseOffset uint64
+	lastOffset uint64
+
+	writePos int64
+
+	lastIndexedPos int64
+
+	maxSize int64
 }
 
-// OpenSegment opens or creates a segment file.
-func OpenSegment(path string) (*Segment, error) {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open segment %s: %w", path, err)
-	}
-
-	stat, err := file.Stat()
+func OpenSegment(path string, baseOffset uint64, maxSize int64) (*Segment, error) {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
 		return nil, err
 	}
 
+	err = file.Truncate(maxSize)
+	if err != nil {
+		return nil, err
+	}
+
+	mmap, err := syscall.Mmap(
+		int(file.Fd()),
+		0,
+		int(maxSize),
+		syscall.PROT_READ|syscall.PROT_WRITE,
+		syscall.MAP_SHARED,
+	)
+
+	if err != nil {
+		return nil, err
+	}
+
+	indexFile, _ := os.OpenFile(path+".index", os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
+
+	timeFile, _ := os.OpenFile(path+".timeindex", os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
+
 	return &Segment{
-		file: file,
-		path: path,
-		size: stat.Size(),
+		logFile:       file,
+		mmap:          mmap,
+		indexFile:     indexFile,
+		timeIndexFile: timeFile,
+		baseOffset:    baseOffset,
+		lastOffset:    baseOffset,
+		maxSize:       maxSize,
 	}, nil
 }
 
-// Append writes data to the end of the segment.
-func (s *Segment) Append(data []byte) (int64, error) {
+// Append
+func (s *Segment) Append(msg *Message) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.closed {
-		return 0, ErrClosed
+	keyLen := len(msg.Key)
+	valLen := len(msg.Value)
+
+	payloadSize := 8 + 8 + 4 + keyLen + 4 + valLen
+	total := 4 + 4 + payloadSize
+
+	if s.writePos+int64(total) > s.maxSize {
+		return 0, ErrSegmentFull
 	}
 
-	writeOffset := s.size
+	start := s.writePos
+	buf := s.mmap[start : start+int64(total)]
+	binary.LittleEndian.PutUint32(buf[0:4], uint32(payloadSize+4))
+	payload := buf[8:]
+	binary.LittleEndian.PutUint64(payload[0:8], msg.Offset)
+	binary.LittleEndian.PutUint64(payload[8:16], uint64(msg.Timestamp))
+	binary.LittleEndian.PutUint32(payload[16:20], uint32(keyLen))
+	copy(payload[20:], msg.Key)
+	pos := 20 + keyLen
+	binary.LittleEndian.PutUint32(payload[pos:pos+4], uint32(valLen))
+	copy(payload[pos+4:], msg.Value)
+	crc := crc32.ChecksumIEEE(payload)
+	binary.LittleEndian.PutUint32(buf[4:8], crc)
+	s.writePos += int64(total)
+	s.lastOffset = msg.Offset
 
-	// Write size header (4 bytes)
-	sizeBuf := make([]byte, 4)
-	binary.LittleEndian.PutUint32(sizeBuf, uint32(len(data)))
-
-	// Write length
-	if _, err := s.file.Write(sizeBuf); err != nil {
-		return 0, err
+	if start-s.lastIndexedPos > _defaultIndexInterval {
+		s.writeIndex(msg.Offset, start)
+		s.writeTimeIndex(msg.Timestamp, start)
+		s.lastIndexedPos = start
 	}
 
-	// Write payload
-	if _, err := s.file.Write(data); err != nil {
-		return 0, err
-	}
-
-	writtenSize := int64(4 + len(data))
-	s.size += writtenSize
-
-	return writeOffset, nil
+	return start, nil
 }
 
-// ReadAt reads a single message from the given offset.
-func (s *Segment) ReadAt(offset int64) ([]byte, int64, error) {
-	s.mu.RLock()
-	staleSize := s.size
-	s.mu.RUnlock()
-
-	if offset >= staleSize {
-		return nil, offset, io.EOF
-	}
-
-	// Read 4 bytes of length
-	lenBuf := make([]byte, 4)
-	if _, err := s.file.ReadAt(lenBuf, offset); err != nil {
-		if err == io.EOF && offset < staleSize {
-			return nil, offset, io.ErrUnexpectedEOF
-		}
-		return nil, offset, err
-	}
-
-	length := binary.LittleEndian.Uint32(lenBuf)
-
-	// Read data
-	data := make([]byte, length)
-	if _, err := s.file.ReadAt(data, offset+4); err != nil {
-		if err == io.EOF {
-			return nil, offset, io.ErrUnexpectedEOF
-		}
-		return nil, offset, err
-	}
-
-	nextOffset := offset + int64(4+length)
-	return data, nextOffset, nil
+// writeIndex writes an index entry.
+func (s *Segment) writeIndex(offset uint64, pos int64) {
+	var buf [8]byte
+	rel := uint32(offset - s.baseOffset)
+	binary.LittleEndian.PutUint32(buf[0:4], rel)
+	binary.LittleEndian.PutUint32(buf[4:8], uint32(pos))
+	s.indexFile.Write(buf[:])
 }
 
-// Size returns the current size of the segment.
-func (s *Segment) Size() int64 {
+// writeTimeIndex writes a time index entry.
+func (s *Segment) writeTimeIndex(ts int64, pos int64) {
+	var buf [12]byte
+	binary.LittleEndian.PutUint64(buf[0:8], uint64(ts))
+	binary.LittleEndian.PutUint32(buf[8:12], uint32(pos))
+	s.timeIndexFile.Write(buf[:])
+}
+
+// ReadAt reads a message at a given position.
+func (s *Segment) ReadAt(pos int64) (*MessageView, int64, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.size
+
+	if pos >= s.writePos {
+		return nil, pos, io.EOF
+	}
+
+	length := binary.LittleEndian.Uint32(s.mmap[pos : pos+4])
+	buf := s.mmap[pos+4 : pos+4+int64(length)]
+	crcStored := binary.LittleEndian.Uint32(buf[0:4])
+	payload := buf[4:]
+
+	if crcStored != crc32.ChecksumIEEE(payload) {
+		return nil, pos, ErrCRC
+	}
+
+	offset := binary.LittleEndian.Uint64(payload[0:8])
+	ts := int64(binary.LittleEndian.Uint64(payload[8:16]))
+	keyLen := binary.LittleEndian.Uint32(payload[16:20])
+	key := payload[20 : 20+keyLen]
+	valPos := 20 + keyLen
+	valLen := binary.LittleEndian.Uint32(payload[valPos : valPos+4])
+	val := payload[valPos+4 : valPos+4+valLen]
+	next := pos + 4 + int64(length)
+
+	return &MessageView{
+		Offset:    offset,
+		Timestamp: ts,
+		Key:       key,
+		Value:     val,
+	}, next, nil
 }
 
-// Close closes the file.
+// Size returns the size of the segment.
+func (s *Segment) Size() int64 {
+	return s.writePos
+}
+
 func (s *Segment) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if s.closed {
-		return nil
+	syscall.Munmap(s.mmap)
+	if s.logFile != nil {
+		s.logFile.Close()
 	}
-	s.closed = true
-
-	s.file.Sync()
-	return s.file.Close()
-}
-
-func (s *Segment) Path() string {
-	return s.path
-}
-
-// Remove closes and deletes the file.
-func (s *Segment) Remove() error {
-	s.Close()
-	return os.Remove(s.path)
-}
-
-// extractSegmentID extracts the segment ID from the file path.
-func extractSegmentID(path string) int64 {
-	var id int64
-	base := filepath.Base(path)
-	fmt.Sscanf(base, "%020d.log", &id)
-	return id
+	if s.indexFile != nil {
+		s.indexFile.Close()
+	}
+	if s.timeIndexFile != nil {
+		s.timeIndexFile.Close()
+	}
+	return nil
 }

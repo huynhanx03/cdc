@@ -13,7 +13,7 @@ import (
 	"github.com/foden/cdc/pkg/models"
 	"github.com/foden/cdc/pkg/pipeline"
 	"github.com/foden/cdc/pkg/registry"
-	"github.com/foden/cdc/pkg/ui"
+	"github.com/foden/cdc/pkg/server"
 	"github.com/foden/cdc/pkg/wal"
 
 	_ "github.com/foden/cdc/pkg/source/postgres"
@@ -60,12 +60,22 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Initialize UI API Server
-	server := ui.NewServer(&cfg.UI, manager)
-	if err := server.Start(); err != nil {
-		slog.Error("failed to start UI server", "err", err)
+	// ── Start gRPC + REST server ───────────────────────────
+	appServer := server.NewAppServer(
+		server.ServerConfig{
+			GRPCPort: cfg.Server.GRPCPort,
+			HTTPPort: cfg.Server.HTTPPort,
+		},
+		cfg,
+		manager,
+	)
+
+	if err := appServer.Start(); err != nil {
+		slog.Error("failed to start gRPC/REST server", "err", err)
+		os.Exit(1)
 	}
 
+	// ── Start CDC pipeline engine ──────────────────────────
 	engine := pipeline.NewEngine(
 		cfg.Pipeline.ChannelBufferSize,
 		cfg.Pipeline.WorkerCount,
@@ -76,7 +86,6 @@ func main() {
 
 	errCh := make(chan error, 1)
 
-	// Start engine in background
 	go func() {
 		if err := engine.Start(); err != nil {
 			slog.Error("engine error", "err", err)
@@ -84,7 +93,7 @@ func main() {
 		}
 	}()
 
-	// Graceful shutdown
+	// ── Graceful shutdown ──────────────────────────────────
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
@@ -96,7 +105,7 @@ func main() {
 	}
 
 	engine.Stop()
-	server.Stop()
+	appServer.Stop()
 	manager.Close()
 
 	slog.Info("cdclight shutdown completed")

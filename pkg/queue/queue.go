@@ -1,115 +1,71 @@
 package queue
 
 import (
-	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync"
 	"time"
 )
 
 var (
-	ErrQueueClosed = errors.New("queue is closed")
+	ErrQueueClosed = fmt.Errorf("queue is closed")
 )
 
-// Queue represents a persistent, append-only message queue for raw bytes.
 type Queue struct {
-	mu             sync.Mutex
-	dir            string
+	mu sync.Mutex
+
+	segments []*Segment
+	active   *Segment
+
+	dir string
+
+	nextOffset     uint64
+	readPos        int64
 	maxSegmentSize int64
-	retentionHours int
-	segments       []*Segment
-	activeSegment  *Segment
 
-	// read pointer
-	readSegIdx int
-	readOffset int64
-
-	closed bool
-
-	// Stats
-	totalEnqueued uint64
-	totalDequeued uint64
+	readSeg int
+	closed  bool
 }
 
-// OpenQueue opens or creates a raw queue at the given directory.
-func OpenQueue(dir string, maxSegmentSize int64, retentionHours int) (*Queue, error) {
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create queue directory %s: %w", dir, err)
+func OpenQueue(dir string, segmentSize int64) (*Queue, error) {
+	err := os.MkdirAll(dir, 0755)
+	if err != nil {
+		return nil, err
 	}
 
 	q := &Queue{
 		dir:            dir,
-		maxSegmentSize: maxSegmentSize,
-		retentionHours: retentionHours,
+		maxSegmentSize: segmentSize,
 	}
 
-	if err := q.loadSegments(); err != nil {
-		return nil, fmt.Errorf("failed to load queue segments: %w", err)
+	err = q.rotate(0)
+	if err != nil {
+		return nil, err
 	}
 
 	return q, nil
 }
 
-func (q *Queue) loadSegments() error {
-	entries, err := os.ReadDir(q.dir)
+func (q *Queue) rotate(baseOffset uint64) error {
+	path := filepath.Join(
+		q.dir,
+		fmt.Sprintf("%020d.log", baseOffset),
+	)
+
+	seg, err := OpenSegment(path, baseOffset, q.maxSegmentSize)
 	if err != nil {
 		return err
 	}
 
-	var segmentPaths []string
-	for _, entry := range entries {
-		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".log" {
-			segmentPaths = append(segmentPaths, filepath.Join(q.dir, entry.Name()))
-		}
-	}
-	sort.Strings(segmentPaths)
-
-	for _, path := range segmentPaths {
-		seg, err := OpenSegment(path)
-		if err != nil {
-			return fmt.Errorf("failed to open segment %s: %w", path, err)
-		}
-		q.segments = append(q.segments, seg)
-	}
-
-	if len(q.segments) == 0 {
-		if err := q.rotateSegment(0); err != nil {
-			return fmt.Errorf("failed to create initial rotating segment: %w", err)
-		}
-	} else {
-		q.activeSegment = q.segments[len(q.segments)-1]
-	}
-
-	return nil
-}
-
-func (q *Queue) rotateSegment(id int64) error {
-	filename := fmt.Sprintf("%020d.log", id)
-	path := filepath.Join(q.dir, filename)
-
-	seg, err := OpenSegment(path)
-	if err != nil {
-		return fmt.Errorf("failed to create new segment %s: %w", path, err)
-	}
-
-	if q.activeSegment != nil {
-		if err := q.activeSegment.Close(); err != nil {
-			slog.Error("Failed to close previous active segment", "err", err, "path", q.activeSegment.Path())
-		}
-	}
-
 	q.segments = append(q.segments, seg)
-	q.activeSegment = seg
+	q.active = seg
+
 	return nil
 }
 
-// Enqueue adds raw data bytes to the queue.
-func (q *Queue) Enqueue(data []byte) error {
+func (q *Queue) Enqueue(key, value []byte) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -117,25 +73,32 @@ func (q *Queue) Enqueue(data []byte) error {
 		return ErrQueueClosed
 	}
 
-	// Rotate if needed
-	if q.activeSegment.Size()+int64(len(data)+4) > q.maxSegmentSize {
-		nextID := extractSegmentID(q.activeSegment.Path()) + 1
-		if err := q.rotateSegment(nextID); err != nil {
-			return fmt.Errorf("failed to rotate segment: %w", err)
+	msg := &Message{
+		Offset:    q.nextOffset,
+		Timestamp: time.Now().UnixNano(),
+		Key:       key,
+		Value:     value,
+	}
+
+	if _, err := q.active.Append(msg); err == ErrSegmentFull {
+		err = q.rotate(q.nextOffset)
+		if err != nil {
+			return err
 		}
-	}
 
-	if _, err := q.activeSegment.Append(data); err != nil {
-		return fmt.Errorf("failed to append to segment: %w", err)
-	}
+		if _, err = q.active.Append(msg); err != nil {
+			return err
+		}
 
-	q.totalEnqueued++
+	} else if err != nil {
+		return err
+	}
+	q.nextOffset++
+
 	return nil
 }
 
-// DequeueBatch reads up to batchSize entries of raw byte data.
-// It will not block. It returns the raw bytes read and nil error if successful.
-func (q *Queue) DequeueBatch(batchSize int) ([][]byte, error) {
+func (q *Queue) DequeueBatch(n int) ([]MessageView, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -143,115 +106,43 @@ func (q *Queue) DequeueBatch(batchSize int) ([][]byte, error) {
 		return nil, ErrQueueClosed
 	}
 
-	var batch [][]byte
+	var out []MessageView
 
-	for len(batch) < batchSize {
-		if q.readSegIdx >= len(q.segments) {
-			// No more active segments
+	for len(out) < n {
+
+		if q.readSeg >= len(q.segments) {
 			break
 		}
 
-		seg := q.segments[q.readSegIdx]
-		data, nextOffset, err := seg.ReadAt(q.readOffset)
+		seg := q.segments[q.readSeg]
+		msg, next, err := seg.ReadAt(q.readPos)
 
-		if err == io.EOF {
-			// End of this segment.
-			// Move to next segment if it's not the last one
-			if q.readSegIdx < len(q.segments)-1 {
-				q.readSegIdx++
-				q.readOffset = 0
-				continue
-			} else {
-				// Waiting for more data in the active segment
+		if err != nil {
+			if err == io.EOF && q.readSeg == len(q.segments)-1 {
+				// Reached end of active segment, break and wait for more data.
 				break
 			}
-		} else if err != nil {
-			slog.Error("Failed to read from queue segment", "err", err, "segment", seg.Path())
-			return batch, fmt.Errorf("read error on segment: %w", err)
-		}
-
-		q.readOffset = nextOffset
-		q.totalDequeued++
-		batch = append(batch, data)
-	}
-
-	return batch, nil
-}
-
-// Commit removes completely read segments.
-// With retention active, it only deletes segments that have been fully read up to readSegIdx AND exceed the retention period.
-func (q *Queue) Commit() error {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-
-	if q.closed {
-		return ErrQueueClosed
-	}
-
-	if q.retentionHours <= 0 {
-		// No retention enforcement: delete fully-read segments immediately
-		if q.readSegIdx > 0 {
-			oldSegments := q.segments[:q.readSegIdx]
-			for _, seg := range oldSegments {
-				if err := seg.Remove(); err != nil {
-					slog.Error("Failed to remove old queue segment", "err", err, "path", seg.Path())
-				} else {
-					slog.Info("Garbage collected old queue segment", "path", seg.Path())
-				}
-			}
-			// Keep remaining
-			q.segments = q.segments[q.readSegIdx:]
-			q.readSegIdx = 0
-		}
-		return nil
-	}
-
-	// Wait for retention to expire before garbage collecting read segments
-	cutoff := time.Now().Add(-time.Duration(q.retentionHours) * time.Hour)
-	var newSegments []*Segment
-	removedCount := 0
-
-	for i, seg := range q.segments {
-		// Retain active unread segments
-		if i == len(q.segments)-1 || i >= q.readSegIdx {
-			newSegments = append(newSegments, seg)
+			q.readSeg++
+			q.readPos = 0
 			continue
 		}
 
-		stat, err := os.Stat(seg.Path())
-		if err == nil && stat.ModTime().Before(cutoff) {
-			if err := seg.Remove(); err != nil {
-				slog.Error("Failed to remove old queue segment", "err", err, "path", seg.Path())
-				newSegments = append(newSegments, seg)
-			} else {
-				slog.Info("Garbage collected old queue segment by retention", "path", seg.Path())
-				removedCount++
-			}
-		} else {
-			newSegments = append(newSegments, seg)
-		}
+		q.readPos = next
+		out = append(out, *msg)
 	}
 
-	q.segments = newSegments
-	q.readSegIdx -= removedCount
-	if q.readSegIdx < 0 {
-		q.readSegIdx = 0
-		q.readOffset = 0
-	}
+	return out, nil
+}
 
+func (q *Queue) Commit() error {
+	// Not implemented in new version
 	return nil
 }
 
-// Close closes the queue and its segments.
 func (q *Queue) Close() error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-
-	if q.closed {
-		return nil
-	}
 	q.closed = true
-
 	var errs []error
 	for _, seg := range q.segments {
 		if err := seg.Close(); err != nil {
@@ -261,11 +152,9 @@ func (q *Queue) Close() error {
 	if len(errs) > 0 {
 		return fmt.Errorf("errors closing segments: %v", errs)
 	}
-
 	return nil
 }
 
-// QueueStats contains metrics for the queue.
 type QueueStats struct {
 	TotalEnqueued uint64 `json:"total_enqueued"`
 	TotalDequeued uint64 `json:"total_dequeued"`
@@ -274,7 +163,6 @@ type QueueStats struct {
 	TotalSizeMB   int64  `json:"total_size_mb"`
 }
 
-// GetStats returns current statistics of the Queue.
 func (q *Queue) GetStats() QueueStats {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -285,42 +173,35 @@ func (q *Queue) GetStats() QueueStats {
 	}
 
 	return QueueStats{
-		TotalEnqueued: q.totalEnqueued,
-		TotalDequeued: q.totalDequeued,
-		Pending:       q.totalEnqueued - q.totalDequeued,
+		TotalEnqueued: q.nextOffset,
 		SegmentsCount: len(q.segments),
-		TotalSizeMB:   totalSize / (1024 * 1024), // MB
+		TotalSizeMB:   totalSize / (1024 * 1024),
 	}
 }
 
-// InspectRaw returns the last `limit` entires from the ends of the active queue for debugging.
-func (q *Queue) InspectRaw(limit int) ([][]byte, error) {
+func (q *Queue) InspectRaw(limit int) ([]MessageView, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	seg := q.activeSegment
-	if seg == nil {
-		return nil, nil
+	if limit <= 0 {
+		limit = 50
 	}
 
-	var batch [][]byte
-	var offset int64 = 0
+	var out []MessageView
 
-	for {
-		data, nextOffset, err := seg.ReadAt(offset)
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return batch, err // Best effort
-		}
+	for si := 0; si < len(q.segments) && len(out) < limit; si++ {
+		seg := q.segments[si]
+		var pos int64
 
-		batch = append(batch, data)
-		if len(batch) > limit {
-			batch = batch[1:] // keep last limit elements
+		for len(out) < limit {
+			msg, next, err := seg.ReadAt(pos)
+			if err != nil {
+				break // EOF or corruption — move to next segment
+			}
+			out = append(out, *msg)
+			pos = next
 		}
-		offset = nextOffset
 	}
 
-	return batch, nil
+	return out, nil
 }

@@ -40,7 +40,7 @@ func RegisterSink(typeName string, factory SinkFactory) {
 func CreateSource(cfg *config.SourceConfig) (interfaces.Source, error) {
 	factory, ok := sources[cfg.Type]
 	if !ok {
-		return nil, fmt.Errorf("unsupported source type: %q (registered: %v)", cfg.Type, sourceNames())
+		return nil, fmt.Errorf("unsupported source type: %q (registered: %v)", cfg.Type, SourceNames())
 	}
 	return factory(cfg)
 }
@@ -49,12 +49,12 @@ func CreateSource(cfg *config.SourceConfig) (interfaces.Source, error) {
 func CreateSink(cfg *config.SinkConfig) (interfaces.Sink, error) {
 	factory, ok := sinks[cfg.Type]
 	if !ok {
-		return nil, fmt.Errorf("unsupported sink type: %q (registered: %v)", cfg.Type, sinkNames())
+		return nil, fmt.Errorf("unsupported sink type: %q (registered: %v)", cfg.Type, SinkNames())
 	}
 	return factory(cfg)
 }
 
-func sourceNames() []string {
+func SourceNames() []string {
 	names := make([]string, 0, len(sources))
 	for k := range sources {
 		names = append(names, k)
@@ -62,7 +62,7 @@ func sourceNames() []string {
 	return names
 }
 
-func sinkNames() []string {
+func SinkNames() []string {
 	names := make([]string, 0, len(sinks))
 	for k := range sinks {
 		names = append(names, k)
