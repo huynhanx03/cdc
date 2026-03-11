@@ -1,0 +1,31 @@
+name: "cdc-pg-es"
+log_mode: "json"  # "json" for production
+
+source:
+  type: "postgres"
+  host: "127.0.0.1"
+  port: 54322
+  user: "user"
+  password: "password"
+  database: "database"
+  slot_name: "cdc_slot_name"
+  publication_name: "cdc_publication_name"
+  tables: 
+    - "public.table_name"
+
+pipeline:
+  channel_buffer_size: 10000
+  worker_count: 5
+
+sinks:
+  - type: "elasticsearch"
+    url: ["http://127.0.0.1:9200"]
+    username: "elastic"
+    password: "password"
+    index_prefix: "cdc_"
+    batch_size: 500
+    flush_interval_ms: 1000
+  - type: "stdout"
+
+
+
