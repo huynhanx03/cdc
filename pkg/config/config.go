@@ -12,6 +12,8 @@ type Config struct {
 	LogMode  string         `mapstructure:"log_mode"` // "json" or "text"
 	Source   SourceConfig   `mapstructure:"source"`
 	Pipeline PipelineConfig `mapstructure:"pipeline"`
+	WAL      WALConfig      `mapstructure:"wal"`
+	UI       UIConfig       `mapstructure:"ui"`
 	Sinks    []SinkConfig   `mapstructure:"sinks"`
 }
 
@@ -33,6 +35,19 @@ type SourceConfig struct {
 type PipelineConfig struct {
 	ChannelBufferSize int `mapstructure:"channel_buffer_size"`
 	WorkerCount       int `mapstructure:"worker_count"`
+}
+
+// WALConfig holds the configuration for the Write-Ahead Log queue.
+type WALConfig struct {
+	Dir            string `mapstructure:"dir"`
+	MaxSegmentSize int64  `mapstructure:"max_segment_size"`
+	RetentionHours int    `mapstructure:"retention_hours"`
+}
+
+// UIConfig holds the configuration for the HTTP UI Server.
+type UIConfig struct {
+	Enabled bool `mapstructure:"enabled"`
+	Port    int  `mapstructure:"port"`
 }
 
 // SinkConfig holds the configuration for the CDC sink.
@@ -88,6 +103,18 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Source.PublicationName == "" {
 		c.Source.PublicationName = "cdc_pub"
+	}
+	if c.WAL.Dir == "" {
+		c.WAL.Dir = "./data/wal"
+	}
+	if c.WAL.MaxSegmentSize <= 0 {
+		c.WAL.MaxSegmentSize = 10 * 1024 * 1024 // 10MB default
+	}
+	if c.WAL.RetentionHours <= 0 {
+		c.WAL.RetentionHours = 24
+	}
+	if c.UI.Port <= 0 {
+		c.UI.Port = 8080
 	}
 	for i := range c.Sinks {
 		if c.Sinks[i].BatchSize <= 0 {

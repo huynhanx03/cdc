@@ -14,8 +14,17 @@ source:
     - "public.table_name"
 
 pipeline:
-  channel_buffer_size: 10000
-  worker_count: 5
+  channel_buffer_size: 1000
+  worker_count: 2
+
+wal:
+  dir: "./data/wal"
+  max_segment_size: 10485760 # 10MB
+  retention_hours: 24
+
+ui:
+  enabled: true
+  port: 8080
 
 sinks:
   - type: "elasticsearch"

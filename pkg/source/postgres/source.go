@@ -364,35 +364,57 @@ func (p *PostgresSource) isTableAllowed(namespace, table string) bool {
 
 // emitEvent converts WAL tuple data into a models.Event and sends it to the pipeline.
 func (p *PostgresSource) emitEvent(op string, rel *pglogrepl.RelationMessage, oldCols, newCols []*pglogrepl.TupleDataColumn, lsn uint64) {
-	before := decodeTuple(rel, oldCols)
-	after := decodeTuple(rel, newCols)
+	before := decodeTupleAsJSON(rel, oldCols)
+	after := decodeTupleAsJSON(rel, newCols)
 	slog.Debug("cdc event", "op", op, "schema", rel.Namespace, "table", rel.RelationName)
 	p.pipeline <- models.NewEvent(op, rel.Namespace, rel.RelationName, before, after, lsn)
 }
 
-// decodeTuple maps WAL column data to a typed map using PostgreSQL OIDs.
-func decodeTuple(rel *pglogrepl.RelationMessage, cols []*pglogrepl.TupleDataColumn) map[string]interface{} {
+// escapeJSON safely escapes double quotes and backslashes in JSON strings.
+func escapeJSON(s string) string {
+	b, _ := json.Marshal(s)
+	// Marshal includes leading and trailing quotes, we strip them.
+	return string(b[1 : len(b)-1])
+}
+
+// decodeTupleAsJSON maps WAL column data directly to a JSON byte array.
+func decodeTupleAsJSON(rel *pglogrepl.RelationMessage, cols []*pglogrepl.TupleDataColumn) json.RawMessage {
 	if cols == nil {
 		return nil
 	}
-	row := make(map[string]interface{}, len(cols))
+
+	var buf strings.Builder
+	buf.WriteByte('{')
+
+	first := true
 	for i, col := range cols {
 		if i >= len(rel.Columns) {
 			break
 		}
+		
+		if col.DataType == 'u' {
+			continue // 'u' = unchanged TOAST
+		}
+
+		if !first {
+			buf.WriteByte(',')
+		}
+		first = false
+
 		name := rel.Columns[i].Name
 		oid := rel.Columns[i].DataType
 
+		buf.WriteString(`"` + escapeJSON(name) + `":`)
+
 		switch col.DataType {
-		case 't': // text representation — parse based on PG type OID
-			row[name] = parseColumnValue(string(col.Data), oid)
+		case 't': // text representation
+			writeColumnJSON(&buf, string(col.Data), oid)
 		case 'n': // explicit NULL
-			row[name] = nil
-		default: // 'u' = unchanged TOAST
-			continue
+			buf.WriteString("null")
 		}
 	}
-	return row
+	buf.WriteByte('}')
+	return json.RawMessage(buf.String())
 }
 
 // PostgreSQL OIDs — https://github.com/postgres/postgres/blob/master/src/include/catalog/pg_type.dat
@@ -415,64 +437,67 @@ const (
 	oidBpchar      = 1042 // char(n)
 )
 
-// parseColumnValue converts a text-encoded PG value to the appropriate Go type.
-func parseColumnValue(raw string, oid uint32) interface{} {
+// writeStringJSON writes a JSON encoded string to the buffer
+func writeStringJSON(buf *strings.Builder, s string) {
+	b, _ := json.Marshal(s)
+	buf.Write(b)
+}
+
+// writeColumnJSON converts a text-encoded PG value to JSON bytes.
+func writeColumnJSON(buf *strings.Builder, raw string, oid uint32) {
 	switch oid {
 	case oidBool:
-		return raw == "t" || raw == "true"
-
+		if raw == "t" || raw == "true" {
+			buf.WriteString("true")
+		} else {
+			buf.WriteString("false")
+		}
 	case oidInt2, oidInt4, oidInt8:
-		v, err := strconv.ParseInt(raw, 10, 64)
-		if err != nil {
-			return raw
+		if _, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			buf.WriteString(raw)
+		} else {
+			writeStringJSON(buf, raw)
 		}
-		return v
-
-	case oidFloat4, oidFloat8:
-		v, err := strconv.ParseFloat(raw, 64)
-		if err != nil {
-			return raw
+	case oidFloat4, oidFloat8, oidNumeric:
+		if _, err := strconv.ParseFloat(raw, 64); err == nil {
+			buf.WriteString(raw)
+		} else {
+			writeStringJSON(buf, raw)
 		}
-		return v
-
-	case oidNumeric:
-		// numeric can be very large — try float64, fallback to string
-		v, err := strconv.ParseFloat(raw, 64)
-		if err != nil {
-			return raw
-		}
-		return v
 
 	case oidTimestamp:
 		// PG format: "2026-03-10 09:19:25.788595"
 		for _, layout := range pgTimestampLayouts {
 			if t, err := time.Parse(layout, raw); err == nil {
-				return t.UnixMilli()
+				buf.WriteString(strconv.FormatInt(t.UnixMilli(), 10))
+				return
 			}
 		}
-		return raw
+		writeStringJSON(buf, raw)
 
 	case oidTimestampTZ:
 		// PG format: "2026-03-10 09:19:25.788595+00"
 		for _, layout := range pgTimestampTZLayouts {
 			if t, err := time.Parse(layout, raw); err == nil {
-				return t.UnixMilli()
+				buf.WriteString(strconv.FormatInt(t.UnixMilli(), 10))
+				return
 			}
 		}
-		return raw
+		writeStringJSON(buf, raw)
 
 	case oidDate:
 		if t, err := time.Parse(time.DateOnly, raw); err == nil {
-			return t.UnixMilli()
+			buf.WriteString(strconv.FormatInt(t.UnixMilli(), 10))
+			return
 		}
-		return raw
+		writeStringJSON(buf, raw)
 
 	case oidJSON, oidJSONB:
-		return json.RawMessage(raw)
+		buf.WriteString(raw)
 
 	default:
 		// text, varchar, uuid, and everything else → keep as string
-		return raw
+		writeStringJSON(buf, raw)
 	}
 }
 

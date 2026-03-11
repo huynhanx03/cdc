@@ -1,6 +1,9 @@
 package models
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Event represents a CDC event payload
 type Event struct {
@@ -11,9 +14,9 @@ type Event struct {
 	// Table name
 	Table string `json:"table"`
 	// Before state of the row (only for update and delete)
-	Before map[string]interface{} `json:"before,omitempty"`
+	Before json.RawMessage `json:"before,omitempty"`
 	// After state of the row (only for create and update)
-	After map[string]interface{} `json:"after,omitempty"`
+	After json.RawMessage `json:"after,omitempty"`
 	// Timestamp when the event occurred (in Unix milliseconds)
 	Timestamp int64 `json:"timestamp"`
 	// LSN tracked for reliable offset committing
@@ -21,7 +24,7 @@ type Event struct {
 }
 
 // NewEvent creates a new CDC event
-func NewEvent(op, db, table string, before, after map[string]interface{}, lsn uint64) *Event {
+func NewEvent(op, db, table string, before, after json.RawMessage, lsn uint64) *Event {
 	return &Event{
 		Op:        op,
 		Database:  db,

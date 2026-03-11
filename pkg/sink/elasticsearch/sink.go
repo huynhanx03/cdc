@@ -82,7 +82,7 @@ func (s *ElasticSink) Write(event *models.Event) error {
 	if event.Op == constant.DeleteAction.String() {
 		docMap = event.Before
 	}
-	if docMap == nil {
+	if len(docMap) == 0 {
 		return nil
 	}
 
@@ -95,9 +95,7 @@ func (s *ElasticSink) Write(event *models.Event) error {
 	if event.Op == constant.DeleteAction.String() {
 		s.writeDeleteAction(index, docID)
 	} else {
-		if err := s.writeIndexAction(index, docID, docMap); err != nil {
-			return err
-		}
+		s.writeIndexAction(index, docID, docMap)
 	}
 
 	s.pending++
@@ -255,10 +253,13 @@ func (s *ElasticSink) indexName(table string) string {
 	return fmt.Sprintf("%s%s", s.cfg.IndexPrefix, safe)
 }
 
-// extractID tries to pull a document ID from the row data.
-func extractID(doc map[string]interface{}) string {
-	if v, ok := doc["id"]; ok {
-		return fmt.Sprintf("%v", v)
+// extractID tries to pull a document ID from the raw JSON payload quickly.
+func extractID(doc json.RawMessage) string {
+	var partial struct {
+		ID interface{} `json:"id"`
+	}
+	if err := json.Unmarshal(doc, &partial); err == nil && partial.ID != nil {
+		return fmt.Sprintf("%v", partial.ID)
 	}
 	return ""
 }
@@ -275,19 +276,13 @@ func (s *ElasticSink) writeDeleteAction(index, docID string) {
 }
 
 // writeIndexAction appends a bulk index (upsert) line.
-func (s *ElasticSink) writeIndexAction(index, docID string, doc map[string]interface{}) error {
+func (s *ElasticSink) writeIndexAction(index, docID string, doc json.RawMessage) {
 	if docID != "" {
 		s.buf.WriteString(fmt.Sprintf(`{"index":{"_index":"%s","_id":"%s"}}`, index, docID))
 	} else {
 		s.buf.WriteString(fmt.Sprintf(`{"index":{"_index":"%s"}}`, index))
 	}
 	s.buf.WriteByte('\n')
-
-	body, err := json.Marshal(doc)
-	if err != nil {
-		return fmt.Errorf("failed to marshal event: %w", err)
-	}
-	s.buf.Write(body)
+	s.buf.Write(doc)
 	s.buf.WriteByte('\n')
-	return nil
 }

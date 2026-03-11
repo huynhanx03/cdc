@@ -10,8 +10,11 @@ import (
 	"github.com/foden/cdc/pkg/config"
 	"github.com/foden/cdc/pkg/interfaces"
 	"github.com/foden/cdc/pkg/logger"
+	"github.com/foden/cdc/pkg/models"
 	"github.com/foden/cdc/pkg/pipeline"
 	"github.com/foden/cdc/pkg/registry"
+	"github.com/foden/cdc/pkg/ui"
+	"github.com/foden/cdc/pkg/wal"
 
 	_ "github.com/foden/cdc/pkg/source/postgres"
 
@@ -29,7 +32,6 @@ func main() {
 		slog.Error("failed to load config", "err", err)
 		os.Exit(1)
 	}
-
 	logger.Init(cfg.LogMode)
 	slog.Info("cdclight starting", "name", cfg.Name, "source", cfg.Source.Type)
 
@@ -46,30 +48,56 @@ func main() {
 		s, err := registry.CreateSink(&sCfg)
 		if err != nil {
 			slog.Error("failed to create sink", "sink_type", sCfg.Type, "err", err)
-			os.Exit(1)
+			continue
 		}
 		sinkList = append(sinkList, s)
+	}
+
+	// Initialize WAL Queue
+	manager, err := wal.OpenManager[*models.Event](cfg.WAL.Dir, cfg.WAL.MaxSegmentSize, cfg.WAL.RetentionHours)
+	if err != nil {
+		slog.Error("failed to open WAL manager", "err", err)
+		os.Exit(1)
+	}
+
+	// Initialize UI API Server
+	server := ui.NewServer(&cfg.UI, manager)
+	if err := server.Start(); err != nil {
+		slog.Error("failed to start UI server", "err", err)
 	}
 
 	engine := pipeline.NewEngine(
 		cfg.Pipeline.ChannelBufferSize,
 		cfg.Pipeline.WorkerCount,
 		src,
-		sinkList...,
+		sinkList,
+		manager,
 	)
 
-	if err := engine.Start(); err != nil {
-		slog.Error("engine error", "err", err)
-		os.Exit(1)
-	}
+	errCh := make(chan error, 1)
 
-	// Graceful shutdown - block main thread until signal received
+	// Start engine in background
+	go func() {
+		if err := engine.Start(); err != nil {
+			slog.Error("engine error", "err", err)
+			errCh <- err
+		}
+	}()
+
+	// Graceful shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
 
-	slog.Info("shutdown signal received")
+	select {
+	case <-sigCh:
+		slog.Info("shutdown signal received")
+	case err := <-errCh:
+		slog.Error("shutting down due to engine error", "err", err)
+	}
+
 	engine.Stop()
+	server.Stop()
+	manager.Close()
 
 	slog.Info("cdclight shutdown completed")
 }
