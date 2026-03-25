@@ -15,8 +15,8 @@ import (
 
 	cdcpb "github.com/foden/cdc/api/proto/v1"
 	"github.com/foden/cdc/pkg/config"
-	"github.com/foden/cdc/pkg/models"
-	"github.com/foden/cdc/pkg/wal"
+	"github.com/foden/cdc/pkg/interfaces"
+	"github.com/foden/cdc/pkg/nats"
 )
 
 // ServerConfig holds configuration for the dual gRPC + REST server.
@@ -29,7 +29,7 @@ type ServerConfig struct {
 type AppServer struct {
 	cfg        ServerConfig
 	appCfg     *config.Config
-	manager    *wal.Manager[*models.Event]
+	natsClient *nats.Client
 
 	grpcServer *grpc.Server
 	httpServer *http.Server
@@ -37,12 +37,12 @@ type AppServer struct {
 }
 
 // NewAppServer creates a new combined gRPC + REST server.
-func NewAppServer(cfg ServerConfig, appCfg *config.Config, manager *wal.Manager[*models.Event]) *AppServer {
+func NewAppServer(cfg ServerConfig, appCfg *config.Config, natsClient *nats.Client, engine interfaces.PipelineEngine) *AppServer {
 	return &AppServer{
-		cfg:     cfg,
-		appCfg:  appCfg,
-		manager: manager,
-		service: NewGRPCService(appCfg, manager),
+		cfg:        cfg,
+		appCfg:     appCfg,
+		natsClient: natsClient,
+		service:    NewGRPCService(appCfg, natsClient, engine),
 	}
 }
 

@@ -1,40 +1,57 @@
 name: "cdc-pg-es"
-log_mode: "json"  # "json" for production
+log_mode: "info"
 
-source:
-  type: "postgres"
-  host: "127.0.0.1"
-  port: 54322
-  user: "user"
-  password: "password"
-  database: "database"
-  slot_name: "cdc_slot_name"
-  publication_name: "cdc_publication_name"
-  tables: 
-    - "public.table_name"
+# Configure multiple database sources
+sources:
+  - type: "postgres"
+    host: "127.0.0.1"
+    port: 5432
+    user: "postgres"
+    password: "password"
+    database: "orders_db"
+    instance_id: "inst1" # Required for multi-source isolation
+    slot_name: "cdc_slot_1"
+    publication_name: "cdc_pub_1"
+    tables:
+      - "public.orders"
+      - "public.order_items"
+
+  - type: "postgres"
+    host: "127.0.0.1"
+    port: 5433
+    user: "postgres"
+    password: "password"
+    database: "users_db"
+    instance_id: "inst2"
+    slot_name: "cdc_slot_2"
+    publication_name: "cdc_pub_2"
+    tables:
+      - "public.users"
+      - "public.profiles"
+
+# NATS JetStream configuration
+nats:
+  url: "nats://127.0.0.1:4222"
+  stream_name: "cdc_stream"
 
 pipeline:
   channel_buffer_size: 1000
-  worker_count: 2
-
-wal:
-  dir: "./data/wal"
-  max_segment_size: 10485760 # 10MB
-  retention_hours: 24
-
-ui:
-  enabled: true
-  port: 8080
+  worker_count: 4
+  # subject_filter allows you to filter specific events
+  # default: ["cdc.>"] (all events)
+  subject_filter: ["cdc.>"]
 
 sinks:
   - type: "elasticsearch"
     url: ["http://127.0.0.1:9200"]
-    username: "elastic"
-    password: "password"
     index_prefix: "cdc_"
-    batch_size: 500
+    batch_size: 100
     flush_interval_ms: 1000
-  - type: "stdout"
+  # - type: "stdout"
+
+server:
+  grpc_port: 50051
+  http_port: 8081
 
 
 

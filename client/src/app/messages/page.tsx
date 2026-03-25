@@ -5,10 +5,11 @@ import { listPartitionsAction, getMessagesAction } from "@/lib/actions";
 import type { PartitionSummary } from "@/lib/grpc";
 
 interface MessageDisplay {
-  offset: number;
-  timestamp: number;
-  key: string;
-  value: string; // base64 encoded from server action
+  sequence: number;
+  timestamp: string;
+  subject: string;
+  data: string; // base64 encoded
+  headers?: Record<string, string>;
 }
 
 function decodeB64(val: string): string {
@@ -21,10 +22,11 @@ function decodeB64(val: string): string {
 
 export default function MessagesPage() {
   const [partitions, setPartitions] = useState<PartitionSummary[]>([]);
-  const [selectedPartition, setSelectedPartition] = useState<number | null>(null);
+  const [selectedPartition, setSelectedPartition] = useState<string | null>(null);
   const [messages, setMessages] = useState<MessageDisplay[]>([]);
   const [limit, setLimit] = useState(50);
   const [offset, setOffset] = useState(0);
+  const [totalCount, setTotalCount] = useState(0);
   const [loading, setLoading] = useState(false);
   const [expanded, setExpanded] = useState<number | null>(null);
 
@@ -34,9 +36,6 @@ export default function MessagesPage() {
         const data = await listPartitionsAction();
         const parts = data.partitions || [];
         setPartitions(parts);
-        if (parts.length > 0 && selectedPartition === undefined) {
-          setSelectedPartition(null);
-        }
       } catch (e) {
         console.error("fetch partitions:", e);
       }
@@ -45,11 +44,12 @@ export default function MessagesPage() {
   }, []);
 
   const fetchMessages = useCallback(async () => {
-    // Global fetch is supported if selectedPartition is null
     setLoading(true);
     try {
-      const data = await getMessagesAction(selectedPartition, offset, limit);
+      // status: 0 is UNSPECIFIED (All)
+      const data = await getMessagesAction(selectedPartition || undefined, offset, limit, 0);
       setMessages(data.messages || []);
+      setTotalCount(data.total_count || 0);
     } catch (e) {
       console.error("fetch messages:", e);
     } finally {
@@ -64,7 +64,7 @@ export default function MessagesPage() {
   const opTag = (msg: MessageDisplay) => {
     let op = "";
     try {
-      const raw = decodeB64(msg.value);
+      const raw = decodeB64(msg.data);
       const parsed = JSON.parse(raw);
       op = (parsed?.op || "").toLowerCase();
     } catch { }
@@ -78,27 +78,23 @@ export default function MessagesPage() {
     <div>
       <div className="page-header">
         <h1 className="page-title">Message Browser</h1>
-        <p className="page-subtitle">Inspect raw CDC events by partition. Click any row to expand the full payload.</p>
+        <p className="page-subtitle">Inspect raw CDC events by subject. Click any row to expand the full payload.</p>
       </div>
 
       {/* Controls */}
       <div className="card" style={{ marginBottom: "24px", display: "flex", gap: "24px", flexWrap: "wrap", alignItems: "center" }}>
         <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-          <label style={{ fontSize: "0.8rem", color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: "0.5px" }}>Partition</label>
-          <select
-            value={selectedPartition ?? "all"}
+          <label style={{ fontSize: "0.8rem", color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: "0.5px" }}>Source ID</label>
+          <input
+            type="text"
+            placeholder="Filter by Source..."
+            value={selectedPartition ?? ""}
             onChange={(e) => {
-              const val = e.target.value;
-              setSelectedPartition(val === "all" ? null : parseInt(val));
+              setSelectedPartition(e.target.value || null);
               setOffset(0);
             }}
             style={{ background: "var(--bg-secondary)", border: "1px solid var(--border-color)", color: "var(--text-primary)", padding: "8px 16px", borderRadius: "6px", minWidth: "160px" }}
-          >
-            <option value="all">All Partitions</option>
-            {partitions.map((p) => (
-              <option key={p.id} value={p.id}>Partition {p.id}</option>
-            ))}
-          </select>
+          />
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
@@ -124,12 +120,12 @@ export default function MessagesPage() {
             ← Prev
           </button>
           <span style={{ color: "var(--text-secondary)", fontSize: "0.9rem", alignSelf: "center", whiteSpace: "nowrap" }}>
-            offset {offset}
+            {offset} to {Math.min(offset + messages.length, totalCount)} of {totalCount}
           </span>
           <button
             className="btn"
             style={{ width: "auto", padding: "10px 20px", background: "rgba(255,255,255,0.08)", color: "#fff" }}
-            disabled={messages.length < limit}
+            disabled={offset + messages.length >= totalCount}
             onClick={() => setOffset(offset + limit)}
           >
             Next →
@@ -145,10 +141,10 @@ export default function MessagesPage() {
         <table>
           <thead>
             <tr>
-              <th>OFFSET</th>
+              <th>SEQ</th>
+              <th>SUBJECT</th>
               <th>OP</th>
               <th>TIMESTAMP</th>
-              <th>KEY</th>
               <th>VALUE PREVIEW</th>
               <th></th>
             </tr>
@@ -163,13 +159,13 @@ export default function MessagesPage() {
             ) : messages.length === 0 ? (
               <tr>
                 <td colSpan={6} style={{ textAlign: "center", color: "var(--text-secondary)" }}>
-                  No messages found for this partition at offset {offset}.
+                  No messages found.
                 </td>
               </tr>
             ) : (
               messages.map((msg) => {
-                const rawValue = decodeB64(msg.value);
-                const isExpanded = expanded === msg.offset;
+                const rawValue = decodeB64(msg.data);
+                const isExpanded = expanded === msg.sequence;
                 let preview = rawValue;
                 let formatted = rawValue;
                 try {
@@ -179,17 +175,17 @@ export default function MessagesPage() {
                 } catch { }
 
                 return (
-                  <React.Fragment key={msg.offset}>
+                  <React.Fragment key={msg.sequence}>
                     <tr
                       style={{ cursor: "pointer" }}
-                      onClick={() => setExpanded(isExpanded ? null : msg.offset)}
+                      onClick={() => setExpanded(isExpanded ? null : msg.sequence)}
                     >
-                      <td style={{ fontFamily: "monospace", color: "var(--accent)" }}>{msg.offset}</td>
+                      <td style={{ fontFamily: "monospace", color: "var(--accent)" }}>{msg.sequence}</td>
+                      <td style={{ fontSize: "0.85rem" }}>{msg.subject}</td>
                       <td>{opTag(msg)}</td>
                       <td style={{ fontSize: "0.85rem", color: "var(--text-secondary)", whiteSpace: "nowrap" }}>
-                        {msg.timestamp ? new Date(msg.timestamp).toLocaleString() : "—"}
+                        {msg.timestamp ? new Date(parseInt(msg.timestamp)).toLocaleString() : "—"}
                       </td>
-                      <td style={{ fontFamily: "monospace", fontSize: "0.85rem" }}>{msg.key || "—"}</td>
                       <td
                         style={{
                           maxWidth: "280px",

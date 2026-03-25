@@ -50,45 +50,57 @@ export default function ConfigPage() {
               <h2 className="text-xl font-bold mb-1">Instance: {config.config.name || "CDC Engine"}</h2>
               <div className="text-sm text-secondary">Operational Mode: Standard</div>
             </div>
-            <div className="badge badge-primary">Log Mode: {config.config.logMode}</div>
+            <div className="badge badge-primary">Log Mode: {config.config.log_mode}</div>
           </div>
         </div>
 
-        {/* Source */}
-        <div className="card">
-          <div className="flex justify-between items-center mb-6">
-            <h2 className="text-xl font-bold">Source Pipeline</h2>
-            <div className="tag blue">{config.config.source.type}</div>
+        {/* Sources */}
+        <div className="space-y-4">
+          <div className="flex justify-between items-end">
+             <h2 className="text-xl font-bold">Data Sources</h2>
+             <span className="text-sm text-secondary">{config.config.sources.length} active pipelines</span>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="space-y-4">
-              <div className="input-group">
-                <label>Connection String Host</label>
-                <div className="text-primary font-mono bg-black/20 p-2 rounded border border-white/5">
-                  {config.config.source.host}:{config.config.source.port}
+          <div className="grid grid-cols-1 gap-6">
+            {config.config.sources.map((source, idx) => (
+              <div key={source.instance_id || idx} className="card relative transition-all hover:border-blue-500/30">
+                <div className="flex justify-between items-center mb-6">
+                  <div className="flex items-center gap-3">
+                    <div className="tag blue">{source.type}</div>
+                    <span className="text-xs font-mono text-secondary">{source.instance_id}</span>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="space-y-4">
+                    <div className="input-group">
+                      <label>Connection String Host</label>
+                      <div className="text-primary font-mono bg-black/20 p-2 rounded border border-white/5">
+                        {source.host}:{source.port}
+                      </div>
+                    </div>
+                    <div className="input-group">
+                      <label>Database Name</label>
+                      <div className="text-primary font-mono bg-black/20 p-2 rounded border border-white/5">
+                        {source.database}
+                      </div>
+                    </div>
+                  </div>
+                  <div>
+                    <div className="input-group">
+                      <label>Tables Tracked ({source.tables.length})</label>
+                      <div className="flex flex-wrap gap-2 mt-2">
+                        {source.tables.length > 0 ? (
+                          source.tables.map(t => (
+                            <span key={t} className="tag tag-outline">{t}</span>
+                          ))
+                        ) : (
+                          <span className="text-secondary italic text-sm">All tables in database</span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
-              <div className="input-group">
-                <label>Database Name</label>
-                <div className="text-primary font-mono bg-black/20 p-2 rounded border border-white/5">
-                  {config.config.source.database}
-                </div>
-              </div>
-            </div>
-            <div>
-              <div className="input-group">
-                <label>Tables Tracked ({config.config.source.tables.length})</label>
-                <div className="flex flex-wrap gap-2 mt-2">
-                  {config.config.source.tables.length > 0 ? (
-                    config.config.source.tables.map(t => (
-                      <span key={t} className="tag tag-outline">{t}</span>
-                    ))
-                  ) : (
-                    <span className="text-secondary italic text-sm">All tables in database</span>
-                  )}
-                </div>
-              </div>
-            </div>
+            ))}
           </div>
         </div>
 
@@ -115,11 +127,11 @@ export default function ConfigPage() {
                       {s.url.join(", ")}
                     </div>
                   </div>
-                  {s.indexPrefix && (
+                  {s.index_prefix && (
                     <div>
                       <label className="text-xs text-secondary block mb-1">Index Prefix</label>
                       <div className="font-mono text-xs bg-black/20 p-2 rounded border border-white/5">
-                        {s.indexPrefix}
+                        {s.index_prefix}
                       </div>
                     </div>
                   )}
@@ -134,13 +146,13 @@ export default function ConfigPage() {
            <div className="card bg-muted/30 border-dashed">
               <h3 className="font-bold mb-3 text-sm text-secondary uppercase tracking-wider">Storage Loaders Available</h3>
               <div className="flex flex-wrap gap-2">
-                {config.availableSources.map(s => <span key={s} className="tag tag-outline ">{s}</span>)}
+                {config.available_sources.map((s: string) => <span key={s} className="tag tag-outline ">{s}</span>)}
               </div>
            </div>
            <div className="card bg-muted/30 border-dashed">
               <h3 className="font-bold mb-3 text-sm text-secondary uppercase tracking-wider">Export Sinks Available</h3>
               <div className="flex flex-wrap gap-2">
-                {config.availableSinks.map(s => <span key={s} className="tag tag-outline">{s}</span>)}
+                {config.available_sinks.map((s: string) => <span key={s} className="tag tag-outline">{s}</span>)}
               </div>
            </div>
         </div>

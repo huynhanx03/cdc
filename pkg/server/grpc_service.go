@@ -2,184 +2,36 @@ package server
 
 import (
 	"context"
-	"encoding/json"
-	"sort"
+	"fmt"
+	"log/slog"
+	"strconv"
 	"time"
 
 	cdcpb "github.com/foden/cdc/api/proto/v1"
 	"github.com/foden/cdc/pkg/config"
-	"github.com/foden/cdc/pkg/models"
+	"github.com/foden/cdc/pkg/interfaces"
+	"github.com/foden/cdc/pkg/nats"
 	"github.com/foden/cdc/pkg/registry"
-	"github.com/foden/cdc/pkg/wal"
+	"github.com/foden/cdc/pkg/utils"
 	"github.com/foden/cdc/version"
 )
 
 type GRPCService struct {
 	cdcpb.UnimplementedCDCServiceServer
 	appCfg *config.Config
+	engine interfaces.PipelineEngine
 
-	manager   *wal.Manager[*models.Event]
-	startTime time.Time
+	natsClient *nats.Client
+	startTime  time.Time
 }
 
-func NewGRPCService(appCfg *config.Config, manager *wal.Manager[*models.Event]) *GRPCService {
+func NewGRPCService(appCfg *config.Config, natsClient *nats.Client, engine interfaces.PipelineEngine) *GRPCService {
 	return &GRPCService{
-		appCfg:    appCfg,
-		manager:   manager,
-		startTime: time.Now(),
+		appCfg:     appCfg,
+		natsClient: natsClient,
+		engine:     engine,
+		startTime:  time.Now(),
 	}
-}
-
-func (s *GRPCService) ListTopics(_ context.Context, _ *cdcpb.ListTopicsRequest) (*cdcpb.ListTopicsResponse, error) {
-
-	ids := s.manager.GetPartitionIDs()
-
-	topicMap := make(map[string]*cdcpb.TopicSummary)
-
-	for _, id := range ids {
-
-		msgs, _ := s.manager.InspectRaw(id, 1)
-		topicName := "default"
-
-		if len(msgs) > 0 && len(msgs[0].Key) > 0 {
-			topicName = string(msgs[0].Key)
-		}
-
-		ts, ok := topicMap[topicName]
-		if !ok {
-			ts = &cdcpb.TopicSummary{Name: topicName}
-			topicMap[topicName] = ts
-		}
-
-		ts.PartitionCount++
-	}
-
-	resp := &cdcpb.ListTopicsResponse{}
-	for _, t := range topicMap {
-		resp.Topics = append(resp.Topics, t)
-	}
-
-	sort.Slice(resp.Topics, func(i, j int) bool {
-		return resp.Topics[i].Name < resp.Topics[j].Name
-	})
-
-	return resp, nil
-}
-
-func (s *GRPCService) GetTopic(_ context.Context, req *cdcpb.GetTopicRequest) (*cdcpb.TopicDetail, error) {
-
-	ids := s.manager.GetPartitionIDs()
-	sort.Ints(ids)
-
-	detail := &cdcpb.TopicDetail{
-		Name: req.Name,
-	}
-
-	for _, id := range ids {
-
-		stats := s.partitionSummary(id)
-		detail.Partitions = append(detail.Partitions, stats)
-	}
-
-	detail.PartitionCount = int32(len(detail.Partitions))
-
-	return detail, nil
-}
-
-func (s *GRPCService) ListPartitions(_ context.Context, _ *cdcpb.ListPartitionsRequest) (*cdcpb.ListPartitionsResponse, error) {
-
-	ids := s.manager.GetPartitionIDs()
-	sort.Ints(ids)
-
-	resp := &cdcpb.ListPartitionsResponse{}
-
-	for _, id := range ids {
-		resp.Partitions = append(resp.Partitions, s.partitionSummary(id))
-	}
-
-	return resp, nil
-}
-
-func (s *GRPCService) GetPartition(_ context.Context, req *cdcpb.GetPartitionRequest) (*cdcpb.PartitionDetail, error) {
-
-	ps := s.partitionSummary(int(req.Id))
-
-	detail := &cdcpb.PartitionDetail{
-		Id:             ps.Id,
-		SizeBytes:      ps.SizeBytes,
-		SegmentCount:   ps.SegmentCount,
-		EarliestOffset: ps.EarliestOffset,
-		LatestOffset:   ps.LatestOffset,
-	}
-
-	return detail, nil
-}
-
-func (s *GRPCService) GetMessages(_ context.Context, req *cdcpb.GetMessagesRequest) (*cdcpb.GetMessagesResponse, error) {
-
-	limit := int(req.Limit)
-	if limit <= 0 || limit > 500 {
-		limit = 20
-	}
-
-	var allMsgs []wal.WalMessage[*models.Event]
-
-	if req.PartitionId == nil {
-		// Global view: fetch from all partitions and sort by timestamp
-		ids := s.manager.GetPartitionIDs()
-		for _, id := range ids {
-			msgs, _ := s.manager.InspectRaw(id, limit)
-			allMsgs = append(allMsgs, msgs...)
-		}
-
-		// Sort by timestamp descending (newest first)
-		sort.Slice(allMsgs, func(i, j int) bool {
-			return allMsgs[i].Timestamp.After(allMsgs[j].Timestamp)
-		})
-
-		// Trim to limit
-		if len(allMsgs) > limit {
-			allMsgs = allMsgs[:limit]
-		}
-	} else {
-		// Single partition view
-		partID := int(*req.PartitionId)
-		msgs, err := s.manager.InspectRaw(partID, limit)
-		if err != nil {
-			return nil, err
-		}
-		allMsgs = msgs
-	}
-
-	resp := &cdcpb.GetMessagesResponse{}
-
-	for _, m := range allMsgs {
-		val, _ := json.Marshal(m.Item)
-
-		resp.Messages = append(resp.Messages, &cdcpb.MessageItem{
-			Offset:    m.Offset,
-			Timestamp: m.Timestamp.UnixMilli(),
-			Key:       string(m.Key),
-			Value:     val,
-		})
-	}
-
-	return resp, nil
-}
-
-func (s *GRPCService) GetStats(_ context.Context, _ *cdcpb.GetStatsRequest) (*cdcpb.StatsResponse, error) {
-
-	st := s.manager.GetTotalStats()
-	ids := s.manager.GetPartitionIDs()
-
-	return &cdcpb.StatsResponse{
-		TotalEnqueued:  st.TotalEnqueued,
-		TotalDequeued:  st.TotalDequeued,
-		Pending:        st.Pending,
-		SegmentsCount:  int32(st.SegmentsCount),
-		TotalSizeMb:    st.TotalSizeMB,
-		PartitionCount: int32(len(ids)),
-	}, nil
 }
 
 func (s *GRPCService) HealthCheck(_ context.Context, _ *cdcpb.HealthCheckRequest) (*cdcpb.HealthCheckResponse, error) {
@@ -192,47 +44,189 @@ func (s *GRPCService) HealthCheck(_ context.Context, _ *cdcpb.HealthCheckRequest
 }
 
 func (s *GRPCService) GetConfig(_ context.Context, _ *cdcpb.GetConfigRequest) (*cdcpb.GetConfigResponse, error) {
-
 	resp := &cdcpb.GetConfigResponse{
 		AvailableSources: registry.SourceNames(),
 		AvailableSinks:   registry.SinkNames(),
 		Config: &cdcpb.AppConfig{
 			Name:    s.appCfg.Name,
 			LogMode: s.appCfg.LogMode,
-			Source: &cdcpb.SourceConfig{
-				Type:     s.appCfg.Source.Type,
-				Host:     s.appCfg.Source.Host,
-				Port:     int32(s.appCfg.Source.Port),
-				Database: s.appCfg.Source.Database,
-				Tables:   s.appCfg.Source.Tables,
-			},
+			Sources: utils.Map(s.appCfg.Sources, func(src config.SourceConfig, _ int) *cdcpb.SourceConfig {
+				return toSourceProto(src)
+			}),
+			Sinks: utils.Map(s.appCfg.Sinks, func(sc config.SinkConfig, _ int) *cdcpb.SinkConfig {
+				return toSinkProto(sc)
+			}),
 		},
 	}
+	return resp, nil
+}
 
+func (s *GRPCService) AddSource(ctx context.Context, req *cdcpb.AddSourceRequest) (*cdcpb.AddSourceResponse, error) {
+	sCfg, err := toSourceConfig(req.Source)
+	if err != nil {
+		return nil, fmt.Errorf("invalid source config: %w", err)
+	}
+
+	src, err := registry.CreateSource(sCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create source: %w", err)
+	}
+
+	if err := s.engine.AddSource(ctx, src); err != nil {
+		return nil, err
+	}
+
+	// Persist updated configuration
+	sCfg.InstanceID = src.InstanceID()
+	updated := false
+	for i, sc := range s.appCfg.Sources {
+		if sc.InstanceID == sCfg.InstanceID {
+			s.appCfg.Sources[i] = *sCfg
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		s.appCfg.Sources = append(s.appCfg.Sources, *sCfg)
+	}
+
+	if err := s.natsClient.SaveConfig(ctx, s.appCfg); err != nil {
+		slog.Error("failed to persist config", "err", err)
+	}
+
+	return &cdcpb.AddSourceResponse{InstanceId: src.InstanceID()}, nil
+}
+
+func (s *GRPCService) RemoveSource(ctx context.Context, req *cdcpb.RemoveSourceRequest) (*cdcpb.RemoveSourceResponse, error) {
+	if err := s.engine.RemoveSource(req.InstanceId); err != nil {
+		return nil, err
+	}
+
+	// Persist updated configuration
+	var newSources []config.SourceConfig
+	for _, sc := range s.appCfg.Sources {
+		if sc.InstanceID != req.InstanceId {
+			newSources = append(newSources, sc)
+		}
+	}
+	s.appCfg.Sources = newSources
+	if err := s.natsClient.SaveConfig(ctx, s.appCfg); err != nil {
+		slog.Error("failed to persist config", "err", err)
+	}
+
+	return &cdcpb.RemoveSourceResponse{Success: true}, nil
+}
+
+func (s *GRPCService) AddSink(ctx context.Context, req *cdcpb.AddSinkRequest) (*cdcpb.AddSinkResponse, error) {
+	sCfg, err := toSinkConfig(req.Sink)
+	if err != nil {
+		return nil, fmt.Errorf("invalid sink config: %w", err)
+	}
+
+	sink, err := registry.CreateSink(sCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create sink: %w", err)
+	}
+
+	s.engine.AddSink(sink)
+
+	// Persist updated configuration
+	updated := false
+	for i, sc := range s.appCfg.Sinks {
+		if sc.InstanceID == sCfg.InstanceID {
+			s.appCfg.Sinks[i] = *sCfg
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		s.appCfg.Sinks = append(s.appCfg.Sinks, *sCfg)
+	}
+
+	if err := s.natsClient.SaveConfig(ctx, s.appCfg); err != nil {
+		slog.Error("failed to persist config", "err", err)
+	}
+
+	return &cdcpb.AddSinkResponse{InstanceId: sink.InstanceID()}, nil
+}
+
+func (s *GRPCService) RemoveSink(ctx context.Context, req *cdcpb.RemoveSinkRequest) (*cdcpb.RemoveSinkResponse, error) {
+	if err := s.engine.RemoveSink(req.InstanceId); err != nil {
+		return nil, err
+	}
+
+	// Persist updated configuration
+	var newSinks []config.SinkConfig
 	for _, sc := range s.appCfg.Sinks {
-		resp.Config.Sinks = append(resp.Config.Sinks, &cdcpb.SinkConfig{
-			Type:        sc.Type,
-			Url:         sc.URL,
-			IndexPrefix: sc.IndexPrefix,
-		})
+		if sc.InstanceID != req.InstanceId {
+			newSinks = append(newSinks, sc)
+		}
+	}
+	s.appCfg.Sinks = newSinks
+	if err := s.natsClient.SaveConfig(ctx, s.appCfg); err != nil {
+		slog.Error("failed to persist config", "err", err)
+	}
+
+	return &cdcpb.RemoveSinkResponse{Success: true}, nil
+}
+
+func (s *GRPCService) GetStats(_ context.Context, _ *cdcpb.GetStatsRequest) (*cdcpb.GetStatsResponse, error) {
+	srcStats, snkStats := s.engine.GetStats()
+
+	resp := &cdcpb.GetStatsResponse{
+		SourceStats: make(map[string]*cdcpb.ComponentStats),
+		SinkStats:   make(map[string]*cdcpb.ComponentStats),
+	}
+
+	for k, v := range srcStats {
+		resp.SourceStats[k] = &cdcpb.ComponentStats{
+			SuccessCount: v.SuccessCount,
+			FailureCount: v.FailureCount,
+			LastError:    v.LastError,
+		}
+	}
+
+	for k, v := range snkStats {
+		resp.SinkStats[k] = &cdcpb.ComponentStats{
+			SuccessCount: v.SuccessCount,
+			FailureCount: v.FailureCount,
+			LastError:    v.LastError,
+		}
 	}
 
 	return resp, nil
 }
-
-func (s *GRPCService) partitionSummary(id int) *cdcpb.PartitionSummary {
-
-	q, err := s.manager.GetPartition(id)
+func (s *GRPCService) ListMessages(ctx context.Context, req *cdcpb.ListMessagesRequest) (*cdcpb.ListMessagesResponse, error) {
+	messages, totalCount, err := s.engine.ListMessages(ctx, req.Status, req.Offset, int(req.Limit))
 	if err != nil {
-		return &cdcpb.PartitionSummary{Id: int32(id)}
+		return nil, err
 	}
 
-	stats := q.GetStats()
-
-	return &cdcpb.PartitionSummary{
-		Id:           int32(id),
-		SizeBytes:    stats.TotalSizeMB * 1024 * 1024,
-		SegmentCount: int32(stats.SegmentsCount),
-		LatestOffset: stats.TotalEnqueued,
+	pbMessages := make([]*cdcpb.MessageItem, len(messages))
+	for i, msg := range messages {
+		pbMessages[i] = &cdcpb.MessageItem{
+			Sequence:  msg.Sequence,
+			Timestamp: strconv.FormatInt(msg.Timestamp, 10),
+			Subject:   msg.Subject,
+			Data:      msg.Data,
+			Headers:   msg.Headers,
+		}
 	}
+
+	return &cdcpb.ListMessagesResponse{
+		Messages:   pbMessages,
+		TotalCount: totalCount,
+	}, nil
+}
+
+func (s *GRPCService) GetConsumerInfo(ctx context.Context, _ *cdcpb.GetConsumerInfoRequest) (*cdcpb.GetConsumerInfoResponse, error) {
+	ackFloor, pendingCount, err := s.engine.GetConsumerInfo(ctx, "pipeline-worker")
+	if err != nil {
+		return nil, err
+	}
+
+	return &cdcpb.GetConsumerInfoResponse{
+		AckFloor:     ackFloor,
+		PendingCount: pendingCount,
+	}, nil
 }

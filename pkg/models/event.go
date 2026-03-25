@@ -9,6 +9,8 @@ import (
 type Event struct {
 	// Op is the operation type: "c" (create), "u" (update), "d" (delete)
 	Op string `json:"op"`
+	// InstanceID identifies the source CDC instance
+	InstanceID string `json:"instance_id"`
 	// Database name
 	Database string `json:"database"`
 	// Table name
@@ -19,19 +21,46 @@ type Event struct {
 	After json.RawMessage `json:"after,omitempty"`
 	// Timestamp when the event occurred (in Unix milliseconds)
 	Timestamp int64 `json:"timestamp"`
-	// LSN tracked for reliable offset committing
+	// LSN tracked for backward compatibility with PostgresSource and old workers
 	LSN uint64 `json:"-"`
+	// Offset is the generic position in the source log (e.g. LSN or binlog file:pos)
+	Offset string `json:"offset,omitempty"`
 }
 
 // NewEvent creates a new CDC event
-func NewEvent(op, db, table string, before, after json.RawMessage, lsn uint64) *Event {
+func NewEvent(op, instanceID, db, table string, before, after json.RawMessage, lsn uint64, offset string) *Event {
 	return &Event{
-		Op:        op,
-		Database:  db,
-		Table:     table,
-		Timestamp: time.Now().UnixMilli(),
-		Before:    before,
-		After:     after,
-		LSN:       lsn,
+		Op:         op,
+		InstanceID: instanceID,
+		Database:   db,
+		Table:      table,
+		Timestamp:  time.Now().UnixMilli(),
+		Before:     before,
+		After:      after,
+		LSN:        lsn,
+		Offset:     offset,
 	}
+}
+
+// ComponentStats represents success/failure metrics for a source or sink.
+type ComponentStats struct {
+	SuccessCount uint64 `json:"success_count"`
+	FailureCount uint64 `json:"failure_count"`
+	LastError    string `json:"last_error"`
+}
+
+type MessageStatus int
+
+const (
+	MessageStatusSent MessageStatus = iota
+	MessageStatusUnsent
+	MessageStatusAll
+)
+
+type Message struct {
+	Sequence  uint64            `json:"sequence"`
+	Timestamp int64             `json:"timestamp"`
+	Subject   string            `json:"subject"`
+	Data      []byte            `json:"data"`
+	Headers   map[string]string `json:"headers"`
 }

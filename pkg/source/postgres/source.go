@@ -23,11 +23,11 @@ import (
 )
 
 const (
-	outputPlugin    = "pgoutput"
-	protoVersion    = "1"
-	standbyInterval = 10 * time.Second
-	walLevelLogical = "logical"
-	snapshotAction  = "NOEXPORT_SNAPSHOT"
+	_outputPlugin    = "pgoutput"
+	_protoVersion    = "1"
+	_standbyInterval = 10 * time.Second
+	_walLevelLogical = "logical"
+	_snapshotAction  = "NOEXPORT_SNAPSHOT"
 )
 
 func init() {
@@ -38,8 +38,8 @@ func init() {
 
 // PostgresSource streams CDC events via PostgreSQL logical replication.
 type PostgresSource struct {
-	cfg      *config.SourceConfig
-	conn     *pgconn.PgConn
+	cfg        *config.SourceConfig
+	conn       *pgconn.PgConn
 	stop       chan struct{}
 	tableMap   map[string]bool
 	pipeline   chan<- *models.Event
@@ -60,14 +60,21 @@ func New(cfg *config.SourceConfig) (*PostgresSource, error) {
 }
 
 // Start performs auto-setup, connects via replication protocol, and streams events.
-func (p *PostgresSource) Start(pipeline chan<- *models.Event, ackCh <-chan uint64) error {
+func (p *PostgresSource) Start(pipeline chan<- *models.Event, ackCh <-chan uint64, initialOffset string) error {
 	p.pipeline = pipeline
 
 	if err := p.ensureSetup(); err != nil {
 		return fmt.Errorf("postgres setup failed: %w", err)
 	}
 
-	return p.connectAndStartReplication(ackCh)
+	startLSN := uint64(0)
+	if initialOffset != "" {
+		if l, err := strconv.ParseUint(initialOffset, 10, 64); err == nil {
+			startLSN = l
+		}
+	}
+
+	return p.connectAndStartReplication(ackCh, pglogrepl.LSN(startLSN))
 }
 
 // Stop gracefully stops the replication stream and closes the connection.
@@ -75,15 +82,21 @@ func (p *PostgresSource) Stop() error {
 	slog.Info("stopping postgres source")
 	close(p.stop)
 	if p.conn != nil {
-		return p.conn.Close(context.Background())
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return p.conn.Close(ctx)
 	}
 	return nil
+}
+
+func (p *PostgresSource) InstanceID() string {
+	return p.cfg.InstanceID
 }
 
 // ensureSetup validates wal_level and auto-creates publication if missing.
 func (p *PostgresSource) ensureSetup() error {
 	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s",
-		p.cfg.User, p.cfg.Password, p.cfg.Host, p.cfg.Port, p.cfg.Database)
+		p.cfg.Username, p.cfg.Password, p.cfg.Host, p.cfg.Port, p.cfg.Database)
 
 	ctx := context.Background()
 	conn, err := pgx.Connect(ctx, connStr)
@@ -104,8 +117,8 @@ func (p *PostgresSource) checkWalLevel(ctx context.Context, conn *pgx.Conn) erro
 	if err := conn.QueryRow(ctx, "SHOW wal_level").Scan(&walLevel); err != nil {
 		return fmt.Errorf("failed to check wal_level: %w", err)
 	}
-	if walLevel != walLevelLogical {
-		return fmt.Errorf("wal_level is '%s', must be '%s' — change postgresql.conf and restart", walLevel, walLevelLogical)
+	if walLevel != _walLevelLogical {
+		return fmt.Errorf("wal_level is '%s', must be '%s' — change postgresql.conf and restart", walLevel, _walLevelLogical)
 	}
 	slog.Info("wal_level check passed", "wal_level", walLevel)
 	return nil
@@ -142,9 +155,9 @@ func (p *PostgresSource) buildCreatePublicationSQL(pubName string) string {
 }
 
 // connectAndStartReplication opens a replication connection and launches the read loop.
-func (p *PostgresSource) connectAndStartReplication(ackCh <-chan uint64) error {
+func (p *PostgresSource) connectAndStartReplication(ackCh <-chan uint64, startLSN pglogrepl.LSN) error {
 	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?replication=database",
-		p.cfg.User, p.cfg.Password, p.cfg.Host, p.cfg.Port, p.cfg.Database)
+		p.cfg.Username, p.cfg.Password, p.cfg.Host, p.cfg.Port, p.cfg.Database)
 
 	ctx := context.Background()
 	conn, err := pgconn.Connect(ctx, connStr)
@@ -157,8 +170,8 @@ func (p *PostgresSource) connectAndStartReplication(ackCh <-chan uint64) error {
 	pubName := p.cfg.PublicationName
 
 	// Create replication slot (ignore "already exists" error)
-	if _, err := pglogrepl.CreateReplicationSlot(ctx, conn, slotName, outputPlugin, pglogrepl.CreateReplicationSlotOptions{
-		SnapshotAction: snapshotAction,
+	if _, err := pglogrepl.CreateReplicationSlot(ctx, conn, slotName, _outputPlugin, pglogrepl.CreateReplicationSlotOptions{
+		SnapshotAction: _snapshotAction,
 	}); err != nil {
 		slog.Warn("create replication slot (may already exist)", "slot", slotName, "err", err)
 	}
@@ -168,20 +181,27 @@ func (p *PostgresSource) connectAndStartReplication(ackCh <-chan uint64) error {
 		return fmt.Errorf("IdentifySystem failed: %w", err)
 	}
 
+	// Use provided startLSN if it's explicitly set and non-zero
+	// Otherwise use sysident.XLogPos (current server position)
+	replicationStartLSN := sysident.XLogPos
+	if startLSN > 0 {
+		replicationStartLSN = startLSN
+	}
+
 	pluginArgs := []string{
-		fmt.Sprintf("proto_version '%s'", protoVersion),
+		fmt.Sprintf("proto_version '%s'", _protoVersion),
 		fmt.Sprintf("publication_names '%s'", pubName),
 	}
 
-	if err := pglogrepl.StartReplication(ctx, conn, slotName, sysident.XLogPos, pglogrepl.StartReplicationOptions{
+	if err := pglogrepl.StartReplication(ctx, conn, slotName, replicationStartLSN, pglogrepl.StartReplicationOptions{
 		PluginArgs: pluginArgs,
 	}); err != nil {
 		return fmt.Errorf("StartReplication failed: %w", err)
 	}
 
-	slog.Info("postgres logical replication started", "slot", slotName, "publication", pubName, "lsn", sysident.XLogPos)
+	slog.Info("postgres logical replication started", "slot", slotName, "publication", pubName, "lsn", replicationStartLSN)
 	go p.ackLoop(ackCh)
-	go p.readLoop(sysident.XLogPos)
+	go p.readLoop(replicationStartLSN)
 	return nil
 }
 
@@ -207,7 +227,7 @@ func (p *PostgresSource) ackLoop(ackCh <-chan uint64) {
 // readLoop continuously reads WAL messages and dispatches CDC events.
 func (p *PostgresSource) readLoop(startLSN pglogrepl.LSN) {
 	clientLSN := startLSN
-	nextStandby := time.Now().Add(standbyInterval)
+	nextStandby := time.Now().Add(_standbyInterval)
 	relations := make(map[uint32]*pglogrepl.RelationMessage)
 
 	for {
@@ -219,7 +239,7 @@ func (p *PostgresSource) readLoop(startLSN pglogrepl.LSN) {
 
 		if time.Now().After(nextStandby) {
 			p.sendStandbyUpdate(clientLSN)
-			nextStandby = time.Now().Add(standbyInterval)
+			nextStandby = time.Now().Add(_standbyInterval)
 		}
 
 		rawMsg, err := p.receiveMessage(nextStandby)
@@ -367,7 +387,7 @@ func (p *PostgresSource) emitEvent(op string, rel *pglogrepl.RelationMessage, ol
 	before := decodeTupleAsJSON(rel, oldCols)
 	after := decodeTupleAsJSON(rel, newCols)
 	slog.Debug("cdc event", "op", op, "schema", rel.Namespace, "table", rel.RelationName)
-	p.pipeline <- models.NewEvent(op, rel.Namespace, rel.RelationName, before, after, lsn)
+	p.pipeline <- models.NewEvent(op, p.cfg.InstanceID, rel.Namespace, rel.RelationName, before, after, lsn, strconv.FormatUint(lsn, 10))
 }
 
 // escapeJSON safely escapes double quotes and backslashes in JSON strings.
@@ -391,7 +411,7 @@ func decodeTupleAsJSON(rel *pglogrepl.RelationMessage, cols []*pglogrepl.TupleDa
 		if i >= len(rel.Columns) {
 			break
 		}
-		
+
 		if col.DataType == 'u' {
 			continue // 'u' = unchanged TOAST
 		}

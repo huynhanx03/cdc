@@ -69,7 +69,7 @@ func New(cfg *config.SinkConfig) (*ElasticSink, error) {
 		client:      client,
 		cfg:         cfg,
 		done:        make(chan struct{}),
-		flushTicker: time.NewTicker(time.Duration(cfg.FlushInterval) * time.Millisecond),
+		flushTicker: time.NewTicker(time.Duration(cfg.FlushIntervalMs) * time.Millisecond),
 	}
 
 	go s.flushLoop()
@@ -86,7 +86,7 @@ func (s *ElasticSink) Write(event *models.Event) error {
 		return nil
 	}
 
-	index := s.indexName(event.Table)
+	index := s.indexName(event.InstanceID, event.Table)
 	docID := extractID(docMap)
 
 	s.mu.Lock()
@@ -99,7 +99,7 @@ func (s *ElasticSink) Write(event *models.Event) error {
 	}
 
 	s.pending++
-	if s.pending >= s.cfg.BatchSize {
+	if s.pending >= int(s.cfg.BatchSize) {
 		return s.flushLocked()
 	}
 	return nil
@@ -130,7 +130,7 @@ func (s *ElasticSink) flushLocked() error {
 	var res *esapi.Response
 	var err error
 
-	for attempt := 0; attempt <= maxRetries; attempt++ {
+	for attempt := 0; attempt <= int(maxRetries); attempt++ {
 		req := esapi.BulkRequest{Body: bytes.NewReader(data)}
 		res, err = req.Do(context.Background(), s.client)
 
@@ -149,7 +149,7 @@ func (s *ElasticSink) flushLocked() error {
 			}
 		}
 
-		if attempt < maxRetries {
+		if attempt < int(maxRetries) {
 			delay := time.Duration(retryBaseMs*(1<<attempt)) * time.Millisecond
 			slog.Warn("bulk request failed, retrying", "attempt", attempt+1, "delay", delay, "err", err)
 			time.Sleep(delay)
@@ -216,6 +216,16 @@ func (s *ElasticSink) Close() error {
 	return s.Flush()
 }
 
+// Type returns the sink type name.
+func (s *ElasticSink) Type() string {
+	return constant.SinkTypeElasticsearch.String()
+}
+
+// InstanceID returns the unique identifier for this sink.
+func (s *ElasticSink) InstanceID() string {
+	return s.cfg.InstanceID
+}
+
 // newClient builds and pings the ES client.
 func newClient(cfg *config.SinkConfig) (*elasticsearch.Client, error) {
 	esCfg := elasticsearch.Config{
@@ -246,11 +256,29 @@ func newClient(cfg *config.SinkConfig) (*elasticsearch.Client, error) {
 	return client, nil
 }
 
-// indexName builds the target index/alias name from prefix + table.
+// indexName builds the target index/alias name from prefix + instance + table.
 // Dots are replaced with underscores (e.g. "public.user_files" → "cdc_public_user_files").
-func (s *ElasticSink) indexName(table string) string {
-	safe := strings.ReplaceAll(table, ".", "_")
-	return fmt.Sprintf("%s%s", s.cfg.IndexPrefix, safe)
+func (s *ElasticSink) indexName(instanceID, table string) string {
+	if s.cfg.IndexMapping != nil {
+		// 1. Try instance-specific mapping "inst1.public.users"
+		if idx, ok := s.cfg.IndexMapping[fmt.Sprintf("%s.%s", instanceID, table)]; ok {
+			return idx
+		}
+		// 2. Try table-only mapping "public.users"
+		if idx, ok := s.cfg.IndexMapping[table]; ok {
+			return idx
+		}
+	}
+
+	if s.cfg.Index != "" {
+		return s.cfg.Index
+	}
+
+	safeTable := strings.ReplaceAll(table, ".", "_")
+	if instanceID != "" && instanceID != "default" {
+		return fmt.Sprintf("%s%s_%s", s.cfg.IndexPrefix, instanceID, safeTable)
+	}
+	return fmt.Sprintf("%s%s", s.cfg.IndexPrefix, safeTable)
 }
 
 // extractID tries to pull a document ID from the raw JSON payload quickly.
