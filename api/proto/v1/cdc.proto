@@ -62,9 +62,22 @@ service CDCService {
     };
   }
 
-  rpc GetConsumerInfo(GetConsumerInfoRequest) returns (GetConsumerInfoResponse) {
+  rpc GetConsumerInfo(GetConsumerInfoRequest)
+      returns (GetConsumerInfoResponse) {
     option (google.api.http) = {
       get : "/api/v1/consumer"
+    };
+  }
+
+  rpc ListTopics(ListTopicsRequest) returns (ListTopicsResponse) {
+    option (google.api.http) = {
+      get : "/api/v1/topics"
+    };
+  }
+
+  rpc ListPartitions(ListPartitionsRequest) returns (ListPartitionsResponse) {
+    option (google.api.http) = {
+      get : "/api/v1/partitions"
     };
   }
 }
@@ -96,7 +109,8 @@ message SourceConfig {
   optional string slot_name = 8;
   optional string publication_name = 9;
   optional string instance_id = 10;
-  optional string name = 11; // Display name
+  optional string name = 11;  // Display name
+  optional string topic = 12; // Routing topic
 }
 
 message SinkConfig {
@@ -114,6 +128,7 @@ message SinkConfig {
   optional string api_key = 12;
   optional string instance_id = 13; // Unique ID for sink
   optional string name = 14;        // Display name
+  optional string topic = 15;       // Routing topic
 }
 
 //  Dynamic Operations
@@ -153,9 +168,10 @@ message ComponentStats {
 // Advanced Explorer
 message ListMessagesRequest {
   MessageStatus status = 1;
-  uint64 offset = 2; // Stream sequence start
-  int32 limit = 3;
-  optional string source_id = 4;
+  optional string source_id = 2;
+  optional string topic = 3;
+  optional string partition = 4;
+  OffsetPaginationRequest pagination = 5;
 }
 
 enum MessageStatus {
@@ -165,8 +181,9 @@ enum MessageStatus {
 }
 
 message ListMessagesResponse {
-  repeated MessageItem messages = 1;
+  repeated MessageItem data = 1;
   uint64 total_count = 2;
+  OffsetPaginationResponse pagination = 3;
 }
 
 message MessageItem {
@@ -177,11 +194,64 @@ message MessageItem {
   map<string, string> headers = 5;
 }
 
-message GetConsumerInfoRequest {
-  string consumer_name = 1;
-}
+message GetConsumerInfoRequest { string consumer_name = 1; }
 
 message GetConsumerInfoResponse {
   uint64 ack_floor = 1; // Highest sequence fully acknowledged
   uint64 pending_count = 2;
+}
+
+message ListTopicsRequest { OffsetPaginationRequest pagination = 1; }
+
+message ListTopicsResponse {
+  repeated TopicSummary data = 1;
+  OffsetPaginationResponse pagination = 2;
+}
+
+message TopicSummary {
+  string name = 1;
+  uint64 message_count = 2;
+  int32 partition_count = 3;
+}
+
+message ListPartitionsRequest {
+  string topic = 1;
+  OffsetPaginationRequest pagination = 2;
+}
+
+message ListPartitionsResponse {
+  repeated PartitionSummary data = 1;
+  OffsetPaginationResponse pagination = 2;
+}
+
+message PartitionSummary {
+  string id = 1; // Full subject/partition name
+  uint64 message_count = 2;
+  string topic = 3;
+}
+
+message OffsetPaginationRequest {
+  uint32 limit = 1;
+  uint32 page = 2;
+  repeated Sort sort = 3;
+}
+
+message Sort {
+  string field = 1;
+  SortOrder order = 2;
+}
+
+enum SortOrder {
+  SORT_ORDER_UNSPECIFIED = 0;
+  SORT_ORDER_ASC = 1;
+  SORT_ORDER_DESC = 2;
+}
+
+message OffsetPaginationResponse {
+  uint64 total_rows = 1;
+  uint32 limit = 2;
+  uint32 page = 3;
+  bool has_next = 4;
+  bool has_prev = 5;
+  repeated Sort sort = 6;
 }

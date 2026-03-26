@@ -83,6 +83,14 @@ export default function ConfigPage() {
                         {source.database}
                       </div>
                     </div>
+                    {source.topic && (
+                      <div className="input-group">
+                        <label>Target Topic</label>
+                        <div className="text-emerald-400 font-mono bg-black/20 p-2 rounded border border-white/5 mb-2">
+                          {source.topic}
+                        </div>
+                      </div>
+                    )}
                   </div>
                   <div>
                     <div className="input-group">
@@ -132,6 +140,14 @@ export default function ConfigPage() {
                       <label className="text-xs text-secondary block mb-1">Index Prefix</label>
                       <div className="font-mono text-xs bg-black/20 p-2 rounded border border-white/5">
                         {s.index_prefix}
+                      </div>
+                    </div>
+                  )}
+                  {s.topic && (
+                    <div>
+                      <label className="text-xs text-emerald-500/80 block mb-1">Source Topic / Filter</label>
+                      <div className="font-mono text-xs text-emerald-400 bg-black/20 p-2 rounded border border-white/5">
+                        {s.topic}
                       </div>
                     </div>
                   )}

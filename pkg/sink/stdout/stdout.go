@@ -21,12 +21,14 @@ func init() {
 // StdoutSink writes events to terminal output for debugging.
 type StdoutSink struct {
 	instanceID string
+	cfg        *config.SinkConfig
 }
 
 // New creates a new stdout sink.
 func New(cfg *config.SinkConfig) *StdoutSink {
 	return &StdoutSink{
 		instanceID: cfg.InstanceID,
+		cfg:        cfg,
 	}
 }
 
@@ -60,6 +62,14 @@ func (s *StdoutSink) Flush() error {
 // Type returns the sink type name.
 func (s *StdoutSink) Type() string {
 	return constant.SinkTypeStdout.String()
+}
+
+// Topic returns the NATS topic pattern this sink subscribes to
+func (s *StdoutSink) Topic() string {
+	if s.cfg.Topic != "" {
+		return s.cfg.Topic
+	}
+	return "cdc.>"
 }
 
 // InstanceID returns the unique identifier for this sink.

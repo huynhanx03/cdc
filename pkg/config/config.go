@@ -21,7 +21,9 @@ type Config struct {
 // SourceConfig holds the configuration for the CDC source.
 type SourceConfig struct {
 	InstanceID      string   `mapstructure:"instance_id" json:"instance_id,omitempty"`
+	Name            string   `mapstructure:"name" json:"name,omitempty"`
 	Type            string   `mapstructure:"type" json:"type"`
+	Topic           string   `mapstructure:"topic" json:"topic,omitempty"`
 	Host            string   `mapstructure:"host" json:"host"`
 	Port            int      `mapstructure:"port" json:"port"`
 	Username        string   `mapstructure:"username"`
@@ -54,7 +56,9 @@ type ServerConfig struct {
 // SinkConfig holds the configuration for the CDC sink.
 type SinkConfig struct {
 	InstanceID      string            `mapstructure:"instance_id" json:"instance_id,omitempty"`
+	Name            string            `mapstructure:"name" json:"name,omitempty"`
 	Type            string            `mapstructure:"type"`
+	Topic           string            `mapstructure:"topic"`
 	URL             []string          `mapstructure:"url"`
 	Username        string            `mapstructure:"username"`
 	Password        string            `mapstructure:"password"`

@@ -71,6 +71,55 @@ func (MessageStatus) EnumDescriptor() ([]byte, []int) {
 	return file_cdc_proto_rawDescGZIP(), []int{0}
 }
 
+type SortOrder int32
+
+const (
+	SortOrder_SORT_ORDER_UNSPECIFIED SortOrder = 0
+	SortOrder_SORT_ORDER_ASC         SortOrder = 1
+	SortOrder_SORT_ORDER_DESC        SortOrder = 2
+)
+
+// Enum value maps for SortOrder.
+var (
+	SortOrder_name = map[int32]string{
+		0: "SORT_ORDER_UNSPECIFIED",
+		1: "SORT_ORDER_ASC",
+		2: "SORT_ORDER_DESC",
+	}
+	SortOrder_value = map[string]int32{
+		"SORT_ORDER_UNSPECIFIED": 0,
+		"SORT_ORDER_ASC":         1,
+		"SORT_ORDER_DESC":        2,
+	}
+)
+
+func (x SortOrder) Enum() *SortOrder {
+	p := new(SortOrder)
+	*p = x
+	return p
+}
+
+func (x SortOrder) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (SortOrder) Descriptor() protoreflect.EnumDescriptor {
+	return file_cdc_proto_enumTypes[1].Descriptor()
+}
+
+func (SortOrder) Type() protoreflect.EnumType {
+	return &file_cdc_proto_enumTypes[1]
+}
+
+func (x SortOrder) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use SortOrder.Descriptor instead.
+func (SortOrder) EnumDescriptor() ([]byte, []int) {
+	return file_cdc_proto_rawDescGZIP(), []int{1}
+}
+
 // ... messages ...
 type GetConfigRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -248,7 +297,8 @@ type SourceConfig struct {
 	SlotName        *string                `protobuf:"bytes,8,opt,name=slot_name,json=slotName,proto3,oneof" json:"slot_name,omitempty"`
 	PublicationName *string                `protobuf:"bytes,9,opt,name=publication_name,json=publicationName,proto3,oneof" json:"publication_name,omitempty"`
 	InstanceId      *string                `protobuf:"bytes,10,opt,name=instance_id,json=instanceId,proto3,oneof" json:"instance_id,omitempty"`
-	Name            *string                `protobuf:"bytes,11,opt,name=name,proto3,oneof" json:"name,omitempty"` // Display name
+	Name            *string                `protobuf:"bytes,11,opt,name=name,proto3,oneof" json:"name,omitempty"`   // Display name
+	Topic           *string                `protobuf:"bytes,12,opt,name=topic,proto3,oneof" json:"topic,omitempty"` // Routing topic
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -360,6 +410,13 @@ func (x *SourceConfig) GetName() string {
 	return ""
 }
 
+func (x *SourceConfig) GetTopic() string {
+	if x != nil && x.Topic != nil {
+		return *x.Topic
+	}
+	return ""
+}
+
 type SinkConfig struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	Type            string                 `protobuf:"bytes,1,opt,name=type,proto3" json:"type,omitempty"`
@@ -376,6 +433,7 @@ type SinkConfig struct {
 	ApiKey          *string                `protobuf:"bytes,12,opt,name=api_key,json=apiKey,proto3,oneof" json:"api_key,omitempty"`
 	InstanceId      *string                `protobuf:"bytes,13,opt,name=instance_id,json=instanceId,proto3,oneof" json:"instance_id,omitempty"` // Unique ID for sink
 	Name            *string                `protobuf:"bytes,14,opt,name=name,proto3,oneof" json:"name,omitempty"`                               // Display name
+	Topic           *string                `protobuf:"bytes,15,opt,name=topic,proto3,oneof" json:"topic,omitempty"`                             // Routing topic
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -504,6 +562,13 @@ func (x *SinkConfig) GetInstanceId() string {
 func (x *SinkConfig) GetName() string {
 	if x != nil && x.Name != nil {
 		return *x.Name
+	}
+	return ""
+}
+
+func (x *SinkConfig) GetTopic() string {
+	if x != nil && x.Topic != nil {
+		return *x.Topic
 	}
 	return ""
 }
@@ -1107,11 +1172,12 @@ func (x *ComponentStats) GetLastError() string {
 
 // Advanced Explorer
 type ListMessagesRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Status        MessageStatus          `protobuf:"varint,1,opt,name=status,proto3,enum=cdc.v1.MessageStatus" json:"status,omitempty"`
-	Offset        uint64                 `protobuf:"varint,2,opt,name=offset,proto3" json:"offset,omitempty"` // Stream sequence start
-	Limit         int32                  `protobuf:"varint,3,opt,name=limit,proto3" json:"limit,omitempty"`
-	SourceId      *string                `protobuf:"bytes,4,opt,name=source_id,json=sourceId,proto3,oneof" json:"source_id,omitempty"`
+	state         protoimpl.MessageState   `protogen:"open.v1"`
+	Status        MessageStatus            `protobuf:"varint,1,opt,name=status,proto3,enum=cdc.v1.MessageStatus" json:"status,omitempty"`
+	SourceId      *string                  `protobuf:"bytes,2,opt,name=source_id,json=sourceId,proto3,oneof" json:"source_id,omitempty"`
+	Topic         *string                  `protobuf:"bytes,3,opt,name=topic,proto3,oneof" json:"topic,omitempty"`
+	Partition     *string                  `protobuf:"bytes,4,opt,name=partition,proto3,oneof" json:"partition,omitempty"`
+	Pagination    *OffsetPaginationRequest `protobuf:"bytes,5,opt,name=pagination,proto3" json:"pagination,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1153,20 +1219,6 @@ func (x *ListMessagesRequest) GetStatus() MessageStatus {
 	return MessageStatus_MESSAGE_STATUS_UNSPECIFIED
 }
 
-func (x *ListMessagesRequest) GetOffset() uint64 {
-	if x != nil {
-		return x.Offset
-	}
-	return 0
-}
-
-func (x *ListMessagesRequest) GetLimit() int32 {
-	if x != nil {
-		return x.Limit
-	}
-	return 0
-}
-
 func (x *ListMessagesRequest) GetSourceId() string {
 	if x != nil && x.SourceId != nil {
 		return *x.SourceId
@@ -1174,10 +1226,32 @@ func (x *ListMessagesRequest) GetSourceId() string {
 	return ""
 }
 
+func (x *ListMessagesRequest) GetTopic() string {
+	if x != nil && x.Topic != nil {
+		return *x.Topic
+	}
+	return ""
+}
+
+func (x *ListMessagesRequest) GetPartition() string {
+	if x != nil && x.Partition != nil {
+		return *x.Partition
+	}
+	return ""
+}
+
+func (x *ListMessagesRequest) GetPagination() *OffsetPaginationRequest {
+	if x != nil {
+		return x.Pagination
+	}
+	return nil
+}
+
 type ListMessagesResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Messages      []*MessageItem         `protobuf:"bytes,1,rep,name=messages,proto3" json:"messages,omitempty"`
-	TotalCount    uint64                 `protobuf:"varint,2,opt,name=total_count,json=totalCount,proto3" json:"total_count,omitempty"`
+	state         protoimpl.MessageState    `protogen:"open.v1"`
+	Data          []*MessageItem            `protobuf:"bytes,1,rep,name=data,proto3" json:"data,omitempty"`
+	TotalCount    uint64                    `protobuf:"varint,2,opt,name=total_count,json=totalCount,proto3" json:"total_count,omitempty"`
+	Pagination    *OffsetPaginationResponse `protobuf:"bytes,3,opt,name=pagination,proto3" json:"pagination,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1212,9 +1286,9 @@ func (*ListMessagesResponse) Descriptor() ([]byte, []int) {
 	return file_cdc_proto_rawDescGZIP(), []int{19}
 }
 
-func (x *ListMessagesResponse) GetMessages() []*MessageItem {
+func (x *ListMessagesResponse) GetData() []*MessageItem {
 	if x != nil {
-		return x.Messages
+		return x.Data
 	}
 	return nil
 }
@@ -1224,6 +1298,13 @@ func (x *ListMessagesResponse) GetTotalCount() uint64 {
 		return x.TotalCount
 	}
 	return 0
+}
+
+func (x *ListMessagesResponse) GetPagination() *OffsetPaginationResponse {
+	if x != nil {
+		return x.Pagination
+	}
+	return nil
 }
 
 type MessageItem struct {
@@ -1398,6 +1479,522 @@ func (x *GetConsumerInfoResponse) GetPendingCount() uint64 {
 	return 0
 }
 
+type ListTopicsRequest struct {
+	state         protoimpl.MessageState   `protogen:"open.v1"`
+	Pagination    *OffsetPaginationRequest `protobuf:"bytes,1,opt,name=pagination,proto3" json:"pagination,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListTopicsRequest) Reset() {
+	*x = ListTopicsRequest{}
+	mi := &file_cdc_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListTopicsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListTopicsRequest) ProtoMessage() {}
+
+func (x *ListTopicsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdc_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListTopicsRequest.ProtoReflect.Descriptor instead.
+func (*ListTopicsRequest) Descriptor() ([]byte, []int) {
+	return file_cdc_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *ListTopicsRequest) GetPagination() *OffsetPaginationRequest {
+	if x != nil {
+		return x.Pagination
+	}
+	return nil
+}
+
+type ListTopicsResponse struct {
+	state         protoimpl.MessageState    `protogen:"open.v1"`
+	Data          []*TopicSummary           `protobuf:"bytes,1,rep,name=data,proto3" json:"data,omitempty"`
+	Pagination    *OffsetPaginationResponse `protobuf:"bytes,2,opt,name=pagination,proto3" json:"pagination,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListTopicsResponse) Reset() {
+	*x = ListTopicsResponse{}
+	mi := &file_cdc_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListTopicsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListTopicsResponse) ProtoMessage() {}
+
+func (x *ListTopicsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cdc_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListTopicsResponse.ProtoReflect.Descriptor instead.
+func (*ListTopicsResponse) Descriptor() ([]byte, []int) {
+	return file_cdc_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *ListTopicsResponse) GetData() []*TopicSummary {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+func (x *ListTopicsResponse) GetPagination() *OffsetPaginationResponse {
+	if x != nil {
+		return x.Pagination
+	}
+	return nil
+}
+
+type TopicSummary struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	Name           string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	MessageCount   uint64                 `protobuf:"varint,2,opt,name=message_count,json=messageCount,proto3" json:"message_count,omitempty"`
+	PartitionCount int32                  `protobuf:"varint,3,opt,name=partition_count,json=partitionCount,proto3" json:"partition_count,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *TopicSummary) Reset() {
+	*x = TopicSummary{}
+	mi := &file_cdc_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TopicSummary) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TopicSummary) ProtoMessage() {}
+
+func (x *TopicSummary) ProtoReflect() protoreflect.Message {
+	mi := &file_cdc_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TopicSummary.ProtoReflect.Descriptor instead.
+func (*TopicSummary) Descriptor() ([]byte, []int) {
+	return file_cdc_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *TopicSummary) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *TopicSummary) GetMessageCount() uint64 {
+	if x != nil {
+		return x.MessageCount
+	}
+	return 0
+}
+
+func (x *TopicSummary) GetPartitionCount() int32 {
+	if x != nil {
+		return x.PartitionCount
+	}
+	return 0
+}
+
+type ListPartitionsRequest struct {
+	state         protoimpl.MessageState   `protogen:"open.v1"`
+	Topic         string                   `protobuf:"bytes,1,opt,name=topic,proto3" json:"topic,omitempty"`
+	Pagination    *OffsetPaginationRequest `protobuf:"bytes,2,opt,name=pagination,proto3" json:"pagination,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListPartitionsRequest) Reset() {
+	*x = ListPartitionsRequest{}
+	mi := &file_cdc_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListPartitionsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListPartitionsRequest) ProtoMessage() {}
+
+func (x *ListPartitionsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdc_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListPartitionsRequest.ProtoReflect.Descriptor instead.
+func (*ListPartitionsRequest) Descriptor() ([]byte, []int) {
+	return file_cdc_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *ListPartitionsRequest) GetTopic() string {
+	if x != nil {
+		return x.Topic
+	}
+	return ""
+}
+
+func (x *ListPartitionsRequest) GetPagination() *OffsetPaginationRequest {
+	if x != nil {
+		return x.Pagination
+	}
+	return nil
+}
+
+type ListPartitionsResponse struct {
+	state         protoimpl.MessageState    `protogen:"open.v1"`
+	Data          []*PartitionSummary       `protobuf:"bytes,1,rep,name=data,proto3" json:"data,omitempty"`
+	Pagination    *OffsetPaginationResponse `protobuf:"bytes,2,opt,name=pagination,proto3" json:"pagination,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListPartitionsResponse) Reset() {
+	*x = ListPartitionsResponse{}
+	mi := &file_cdc_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListPartitionsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListPartitionsResponse) ProtoMessage() {}
+
+func (x *ListPartitionsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cdc_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListPartitionsResponse.ProtoReflect.Descriptor instead.
+func (*ListPartitionsResponse) Descriptor() ([]byte, []int) {
+	return file_cdc_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *ListPartitionsResponse) GetData() []*PartitionSummary {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+func (x *ListPartitionsResponse) GetPagination() *OffsetPaginationResponse {
+	if x != nil {
+		return x.Pagination
+	}
+	return nil
+}
+
+type PartitionSummary struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"` // Full subject/partition name
+	MessageCount  uint64                 `protobuf:"varint,2,opt,name=message_count,json=messageCount,proto3" json:"message_count,omitempty"`
+	Topic         string                 `protobuf:"bytes,3,opt,name=topic,proto3" json:"topic,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PartitionSummary) Reset() {
+	*x = PartitionSummary{}
+	mi := &file_cdc_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PartitionSummary) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PartitionSummary) ProtoMessage() {}
+
+func (x *PartitionSummary) ProtoReflect() protoreflect.Message {
+	mi := &file_cdc_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PartitionSummary.ProtoReflect.Descriptor instead.
+func (*PartitionSummary) Descriptor() ([]byte, []int) {
+	return file_cdc_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *PartitionSummary) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *PartitionSummary) GetMessageCount() uint64 {
+	if x != nil {
+		return x.MessageCount
+	}
+	return 0
+}
+
+func (x *PartitionSummary) GetTopic() string {
+	if x != nil {
+		return x.Topic
+	}
+	return ""
+}
+
+type OffsetPaginationRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Limit         uint32                 `protobuf:"varint,1,opt,name=limit,proto3" json:"limit,omitempty"`
+	Page          uint32                 `protobuf:"varint,2,opt,name=page,proto3" json:"page,omitempty"`
+	Sort          []*Sort                `protobuf:"bytes,3,rep,name=sort,proto3" json:"sort,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *OffsetPaginationRequest) Reset() {
+	*x = OffsetPaginationRequest{}
+	mi := &file_cdc_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OffsetPaginationRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OffsetPaginationRequest) ProtoMessage() {}
+
+func (x *OffsetPaginationRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdc_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OffsetPaginationRequest.ProtoReflect.Descriptor instead.
+func (*OffsetPaginationRequest) Descriptor() ([]byte, []int) {
+	return file_cdc_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *OffsetPaginationRequest) GetLimit() uint32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+func (x *OffsetPaginationRequest) GetPage() uint32 {
+	if x != nil {
+		return x.Page
+	}
+	return 0
+}
+
+func (x *OffsetPaginationRequest) GetSort() []*Sort {
+	if x != nil {
+		return x.Sort
+	}
+	return nil
+}
+
+type Sort struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Field         string                 `protobuf:"bytes,1,opt,name=field,proto3" json:"field,omitempty"`
+	Order         SortOrder              `protobuf:"varint,2,opt,name=order,proto3,enum=cdc.v1.SortOrder" json:"order,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Sort) Reset() {
+	*x = Sort{}
+	mi := &file_cdc_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Sort) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Sort) ProtoMessage() {}
+
+func (x *Sort) ProtoReflect() protoreflect.Message {
+	mi := &file_cdc_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Sort.ProtoReflect.Descriptor instead.
+func (*Sort) Descriptor() ([]byte, []int) {
+	return file_cdc_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *Sort) GetField() string {
+	if x != nil {
+		return x.Field
+	}
+	return ""
+}
+
+func (x *Sort) GetOrder() SortOrder {
+	if x != nil {
+		return x.Order
+	}
+	return SortOrder_SORT_ORDER_UNSPECIFIED
+}
+
+type OffsetPaginationResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TotalRows     uint64                 `protobuf:"varint,1,opt,name=total_rows,json=totalRows,proto3" json:"total_rows,omitempty"`
+	Limit         uint32                 `protobuf:"varint,2,opt,name=limit,proto3" json:"limit,omitempty"`
+	Page          uint32                 `protobuf:"varint,3,opt,name=page,proto3" json:"page,omitempty"`
+	HasNext       bool                   `protobuf:"varint,4,opt,name=has_next,json=hasNext,proto3" json:"has_next,omitempty"`
+	HasPrev       bool                   `protobuf:"varint,5,opt,name=has_prev,json=hasPrev,proto3" json:"has_prev,omitempty"`
+	Sort          []*Sort                `protobuf:"bytes,6,rep,name=sort,proto3" json:"sort,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *OffsetPaginationResponse) Reset() {
+	*x = OffsetPaginationResponse{}
+	mi := &file_cdc_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OffsetPaginationResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OffsetPaginationResponse) ProtoMessage() {}
+
+func (x *OffsetPaginationResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cdc_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OffsetPaginationResponse.ProtoReflect.Descriptor instead.
+func (*OffsetPaginationResponse) Descriptor() ([]byte, []int) {
+	return file_cdc_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *OffsetPaginationResponse) GetTotalRows() uint64 {
+	if x != nil {
+		return x.TotalRows
+	}
+	return 0
+}
+
+func (x *OffsetPaginationResponse) GetLimit() uint32 {
+	if x != nil {
+		return x.Limit
+	}
+	return 0
+}
+
+func (x *OffsetPaginationResponse) GetPage() uint32 {
+	if x != nil {
+		return x.Page
+	}
+	return 0
+}
+
+func (x *OffsetPaginationResponse) GetHasNext() bool {
+	if x != nil {
+		return x.HasNext
+	}
+	return false
+}
+
+func (x *OffsetPaginationResponse) GetHasPrev() bool {
+	if x != nil {
+		return x.HasPrev
+	}
+	return false
+}
+
+func (x *OffsetPaginationResponse) GetSort() []*Sort {
+	if x != nil {
+		return x.Sort
+	}
+	return nil
+}
+
 var File_cdc_proto protoreflect.FileDescriptor
 
 const file_cdc_proto_rawDesc = "" +
@@ -1412,7 +2009,7 @@ const file_cdc_proto_rawDesc = "" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x19\n" +
 	"\blog_mode\x18\x02 \x01(\tR\alogMode\x12.\n" +
 	"\asources\x18\x03 \x03(\v2\x14.cdc.v1.SourceConfigR\asources\x12(\n" +
-	"\x05sinks\x18\x04 \x03(\v2\x12.cdc.v1.SinkConfigR\x05sinks\"\xa7\x03\n" +
+	"\x05sinks\x18\x04 \x03(\v2\x12.cdc.v1.SinkConfigR\x05sinks\"\xcc\x03\n" +
 	"\fSourceConfig\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x12\n" +
 	"\x04host\x18\x02 \x01(\tR\x04host\x12\x12\n" +
@@ -1426,14 +2023,16 @@ const file_cdc_proto_rawDesc = "" +
 	"\vinstance_id\x18\n" +
 	" \x01(\tH\x04R\n" +
 	"instanceId\x88\x01\x01\x12\x17\n" +
-	"\x04name\x18\v \x01(\tH\x05R\x04name\x88\x01\x01B\v\n" +
+	"\x04name\x18\v \x01(\tH\x05R\x04name\x88\x01\x01\x12\x19\n" +
+	"\x05topic\x18\f \x01(\tH\x06R\x05topic\x88\x01\x01B\v\n" +
 	"\t_usernameB\v\n" +
 	"\t_passwordB\f\n" +
 	"\n" +
 	"_slot_nameB\x13\n" +
 	"\x11_publication_nameB\x0e\n" +
 	"\f_instance_idB\a\n" +
-	"\x05_name\"\xe5\x05\n" +
+	"\x05_nameB\b\n" +
+	"\x06_topic\"\x8a\x06\n" +
 	"\n" +
 	"SinkConfig\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x10\n" +
@@ -1454,7 +2053,8 @@ const file_cdc_proto_rawDesc = "" +
 	"\vinstance_id\x18\r \x01(\tH\tR\n" +
 	"instanceId\x88\x01\x01\x12\x17\n" +
 	"\x04name\x18\x0e \x01(\tH\n" +
-	"R\x04name\x88\x01\x01\x1a?\n" +
+	"R\x04name\x88\x01\x01\x12\x19\n" +
+	"\x05topic\x18\x0f \x01(\tH\vR\x05topic\x88\x01\x01\x1a?\n" +
 	"\x11IndexMappingEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\v\n" +
@@ -1469,7 +2069,8 @@ const file_cdc_proto_rawDesc = "" +
 	"\n" +
 	"\b_api_keyB\x0e\n" +
 	"\f_instance_idB\a\n" +
-	"\x05_name\"@\n" +
+	"\x05_nameB\b\n" +
+	"\x06_topic\"@\n" +
 	"\x10AddSourceRequest\x12,\n" +
 	"\x06source\x18\x01 \x01(\v2\x14.cdc.v1.SourceConfigR\x06source\"4\n" +
 	"\x11AddSourceResponse\x12\x1f\n" +
@@ -1510,18 +2111,27 @@ const file_cdc_proto_rawDesc = "" +
 	"\rsuccess_count\x18\x01 \x01(\x04R\fsuccessCount\x12#\n" +
 	"\rfailure_count\x18\x02 \x01(\x04R\ffailureCount\x12\x1d\n" +
 	"\n" +
-	"last_error\x18\x03 \x01(\tR\tlastError\"\xa2\x01\n" +
+	"last_error\x18\x03 \x01(\tR\tlastError\"\x8b\x02\n" +
 	"\x13ListMessagesRequest\x12-\n" +
-	"\x06status\x18\x01 \x01(\x0e2\x15.cdc.v1.MessageStatusR\x06status\x12\x16\n" +
-	"\x06offset\x18\x02 \x01(\x04R\x06offset\x12\x14\n" +
-	"\x05limit\x18\x03 \x01(\x05R\x05limit\x12 \n" +
-	"\tsource_id\x18\x04 \x01(\tH\x00R\bsourceId\x88\x01\x01B\f\n" +
+	"\x06status\x18\x01 \x01(\x0e2\x15.cdc.v1.MessageStatusR\x06status\x12 \n" +
+	"\tsource_id\x18\x02 \x01(\tH\x00R\bsourceId\x88\x01\x01\x12\x19\n" +
+	"\x05topic\x18\x03 \x01(\tH\x01R\x05topic\x88\x01\x01\x12!\n" +
+	"\tpartition\x18\x04 \x01(\tH\x02R\tpartition\x88\x01\x01\x12?\n" +
 	"\n" +
-	"_source_id\"h\n" +
-	"\x14ListMessagesResponse\x12/\n" +
-	"\bmessages\x18\x01 \x03(\v2\x13.cdc.v1.MessageItemR\bmessages\x12\x1f\n" +
+	"pagination\x18\x05 \x01(\v2\x1f.cdc.v1.OffsetPaginationRequestR\n" +
+	"paginationB\f\n" +
+	"\n" +
+	"_source_idB\b\n" +
+	"\x06_topicB\f\n" +
+	"\n" +
+	"_partition\"\xa2\x01\n" +
+	"\x14ListMessagesResponse\x12'\n" +
+	"\x04data\x18\x01 \x03(\v2\x13.cdc.v1.MessageItemR\x04data\x12\x1f\n" +
 	"\vtotal_count\x18\x02 \x01(\x04R\n" +
-	"totalCount\"\xed\x01\n" +
+	"totalCount\x12@\n" +
+	"\n" +
+	"pagination\x18\x03 \x01(\v2 .cdc.v1.OffsetPaginationResponseR\n" +
+	"pagination\"\xed\x01\n" +
 	"\vMessageItem\x12\x1a\n" +
 	"\bsequence\x18\x01 \x01(\x04R\bsequence\x12\x1c\n" +
 	"\ttimestamp\x18\x02 \x01(\tR\ttimestamp\x12\x18\n" +
@@ -1535,11 +2145,57 @@ const file_cdc_proto_rawDesc = "" +
 	"\rconsumer_name\x18\x01 \x01(\tR\fconsumerName\"[\n" +
 	"\x17GetConsumerInfoResponse\x12\x1b\n" +
 	"\tack_floor\x18\x01 \x01(\x04R\backFloor\x12#\n" +
-	"\rpending_count\x18\x02 \x01(\x04R\fpendingCount*c\n" +
+	"\rpending_count\x18\x02 \x01(\x04R\fpendingCount\"T\n" +
+	"\x11ListTopicsRequest\x12?\n" +
+	"\n" +
+	"pagination\x18\x01 \x01(\v2\x1f.cdc.v1.OffsetPaginationRequestR\n" +
+	"pagination\"\x80\x01\n" +
+	"\x12ListTopicsResponse\x12(\n" +
+	"\x04data\x18\x01 \x03(\v2\x14.cdc.v1.TopicSummaryR\x04data\x12@\n" +
+	"\n" +
+	"pagination\x18\x02 \x01(\v2 .cdc.v1.OffsetPaginationResponseR\n" +
+	"pagination\"p\n" +
+	"\fTopicSummary\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12#\n" +
+	"\rmessage_count\x18\x02 \x01(\x04R\fmessageCount\x12'\n" +
+	"\x0fpartition_count\x18\x03 \x01(\x05R\x0epartitionCount\"n\n" +
+	"\x15ListPartitionsRequest\x12\x14\n" +
+	"\x05topic\x18\x01 \x01(\tR\x05topic\x12?\n" +
+	"\n" +
+	"pagination\x18\x02 \x01(\v2\x1f.cdc.v1.OffsetPaginationRequestR\n" +
+	"pagination\"\x88\x01\n" +
+	"\x16ListPartitionsResponse\x12,\n" +
+	"\x04data\x18\x01 \x03(\v2\x18.cdc.v1.PartitionSummaryR\x04data\x12@\n" +
+	"\n" +
+	"pagination\x18\x02 \x01(\v2 .cdc.v1.OffsetPaginationResponseR\n" +
+	"pagination\"]\n" +
+	"\x10PartitionSummary\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12#\n" +
+	"\rmessage_count\x18\x02 \x01(\x04R\fmessageCount\x12\x14\n" +
+	"\x05topic\x18\x03 \x01(\tR\x05topic\"e\n" +
+	"\x17OffsetPaginationRequest\x12\x14\n" +
+	"\x05limit\x18\x01 \x01(\rR\x05limit\x12\x12\n" +
+	"\x04page\x18\x02 \x01(\rR\x04page\x12 \n" +
+	"\x04sort\x18\x03 \x03(\v2\f.cdc.v1.SortR\x04sort\"E\n" +
+	"\x04Sort\x12\x14\n" +
+	"\x05field\x18\x01 \x01(\tR\x05field\x12'\n" +
+	"\x05order\x18\x02 \x01(\x0e2\x11.cdc.v1.SortOrderR\x05order\"\xbb\x01\n" +
+	"\x18OffsetPaginationResponse\x12\x1d\n" +
+	"\n" +
+	"total_rows\x18\x01 \x01(\x04R\ttotalRows\x12\x14\n" +
+	"\x05limit\x18\x02 \x01(\rR\x05limit\x12\x12\n" +
+	"\x04page\x18\x03 \x01(\rR\x04page\x12\x19\n" +
+	"\bhas_next\x18\x04 \x01(\bR\ahasNext\x12\x19\n" +
+	"\bhas_prev\x18\x05 \x01(\bR\ahasPrev\x12 \n" +
+	"\x04sort\x18\x06 \x03(\v2\f.cdc.v1.SortR\x04sort*c\n" +
 	"\rMessageStatus\x12\x1e\n" +
 	"\x1aMESSAGE_STATUS_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13MESSAGE_STATUS_SENT\x10\x01\x12\x19\n" +
-	"\x15MESSAGE_STATUS_UNSENT\x10\x022\xff\x06\n" +
+	"\x15MESSAGE_STATUS_UNSENT\x10\x02*P\n" +
+	"\tSortOrder\x12\x1a\n" +
+	"\x16SORT_ORDER_UNSPECIFIED\x10\x00\x12\x12\n" +
+	"\x0eSORT_ORDER_ASC\x10\x01\x12\x13\n" +
+	"\x0fSORT_ORDER_DESC\x10\x022\xc9\b\n" +
 	"\n" +
 	"CDCService\x12^\n" +
 	"\vHealthCheck\x12\x1a.cdc.v1.HealthCheckRequest\x1a\x1b.cdc.v1.HealthCheckResponse\"\x16\x82\xd3\xe4\x93\x02\x10\x12\x0e/api/v1/health\x12X\n" +
@@ -1551,7 +2207,10 @@ const file_cdc_proto_rawDesc = "" +
 	"RemoveSink\x12\x19.cdc.v1.RemoveSinkRequest\x1a\x1a.cdc.v1.RemoveSinkResponse\"#\x82\xd3\xe4\x93\x02\x1d*\x1b/api/v1/sinks/{instance_id}\x12T\n" +
 	"\bGetStats\x12\x17.cdc.v1.GetStatsRequest\x1a\x18.cdc.v1.GetStatsResponse\"\x15\x82\xd3\xe4\x93\x02\x0f\x12\r/api/v1/stats\x12c\n" +
 	"\fListMessages\x12\x1b.cdc.v1.ListMessagesRequest\x1a\x1c.cdc.v1.ListMessagesResponse\"\x18\x82\xd3\xe4\x93\x02\x12\x12\x10/api/v1/messages\x12l\n" +
-	"\x0fGetConsumerInfo\x12\x1e.cdc.v1.GetConsumerInfoRequest\x1a\x1f.cdc.v1.GetConsumerInfoResponse\"\x18\x82\xd3\xe4\x93\x02\x12\x12\x10/api/v1/consumerB)Z'github.com/foden/cdc/api/proto/v1;cdcpbb\x06proto3"
+	"\x0fGetConsumerInfo\x12\x1e.cdc.v1.GetConsumerInfoRequest\x1a\x1f.cdc.v1.GetConsumerInfoResponse\"\x18\x82\xd3\xe4\x93\x02\x12\x12\x10/api/v1/consumer\x12[\n" +
+	"\n" +
+	"ListTopics\x12\x19.cdc.v1.ListTopicsRequest\x1a\x1a.cdc.v1.ListTopicsResponse\"\x16\x82\xd3\xe4\x93\x02\x10\x12\x0e/api/v1/topics\x12k\n" +
+	"\x0eListPartitions\x12\x1d.cdc.v1.ListPartitionsRequest\x1a\x1e.cdc.v1.ListPartitionsResponse\"\x1a\x82\xd3\xe4\x93\x02\x14\x12\x12/api/v1/partitionsB)Z'github.com/foden/cdc/api/proto/v1;cdcpbb\x06proto3"
 
 var (
 	file_cdc_proto_rawDescOnce sync.Once
@@ -1565,75 +2224,100 @@ func file_cdc_proto_rawDescGZIP() []byte {
 	return file_cdc_proto_rawDescData
 }
 
-var file_cdc_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_cdc_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
+var file_cdc_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_cdc_proto_msgTypes = make([]protoimpl.MessageInfo, 36)
 var file_cdc_proto_goTypes = []any{
-	(MessageStatus)(0),              // 0: cdc.v1.MessageStatus
-	(*GetConfigRequest)(nil),        // 1: cdc.v1.GetConfigRequest
-	(*GetConfigResponse)(nil),       // 2: cdc.v1.GetConfigResponse
-	(*AppConfig)(nil),               // 3: cdc.v1.AppConfig
-	(*SourceConfig)(nil),            // 4: cdc.v1.SourceConfig
-	(*SinkConfig)(nil),              // 5: cdc.v1.SinkConfig
-	(*AddSourceRequest)(nil),        // 6: cdc.v1.AddSourceRequest
-	(*AddSourceResponse)(nil),       // 7: cdc.v1.AddSourceResponse
-	(*RemoveSourceRequest)(nil),     // 8: cdc.v1.RemoveSourceRequest
-	(*RemoveSourceResponse)(nil),    // 9: cdc.v1.RemoveSourceResponse
-	(*AddSinkRequest)(nil),          // 10: cdc.v1.AddSinkRequest
-	(*AddSinkResponse)(nil),         // 11: cdc.v1.AddSinkResponse
-	(*RemoveSinkRequest)(nil),       // 12: cdc.v1.RemoveSinkRequest
-	(*RemoveSinkResponse)(nil),      // 13: cdc.v1.RemoveSinkResponse
-	(*HealthCheckRequest)(nil),      // 14: cdc.v1.HealthCheckRequest
-	(*HealthCheckResponse)(nil),     // 15: cdc.v1.HealthCheckResponse
-	(*GetStatsRequest)(nil),         // 16: cdc.v1.GetStatsRequest
-	(*GetStatsResponse)(nil),        // 17: cdc.v1.GetStatsResponse
-	(*ComponentStats)(nil),          // 18: cdc.v1.ComponentStats
-	(*ListMessagesRequest)(nil),     // 19: cdc.v1.ListMessagesRequest
-	(*ListMessagesResponse)(nil),    // 20: cdc.v1.ListMessagesResponse
-	(*MessageItem)(nil),             // 21: cdc.v1.MessageItem
-	(*GetConsumerInfoRequest)(nil),  // 22: cdc.v1.GetConsumerInfoRequest
-	(*GetConsumerInfoResponse)(nil), // 23: cdc.v1.GetConsumerInfoResponse
-	nil,                             // 24: cdc.v1.SinkConfig.IndexMappingEntry
-	nil,                             // 25: cdc.v1.GetStatsResponse.SourceStatsEntry
-	nil,                             // 26: cdc.v1.GetStatsResponse.SinkStatsEntry
-	nil,                             // 27: cdc.v1.MessageItem.HeadersEntry
+	(MessageStatus)(0),               // 0: cdc.v1.MessageStatus
+	(SortOrder)(0),                   // 1: cdc.v1.SortOrder
+	(*GetConfigRequest)(nil),         // 2: cdc.v1.GetConfigRequest
+	(*GetConfigResponse)(nil),        // 3: cdc.v1.GetConfigResponse
+	(*AppConfig)(nil),                // 4: cdc.v1.AppConfig
+	(*SourceConfig)(nil),             // 5: cdc.v1.SourceConfig
+	(*SinkConfig)(nil),               // 6: cdc.v1.SinkConfig
+	(*AddSourceRequest)(nil),         // 7: cdc.v1.AddSourceRequest
+	(*AddSourceResponse)(nil),        // 8: cdc.v1.AddSourceResponse
+	(*RemoveSourceRequest)(nil),      // 9: cdc.v1.RemoveSourceRequest
+	(*RemoveSourceResponse)(nil),     // 10: cdc.v1.RemoveSourceResponse
+	(*AddSinkRequest)(nil),           // 11: cdc.v1.AddSinkRequest
+	(*AddSinkResponse)(nil),          // 12: cdc.v1.AddSinkResponse
+	(*RemoveSinkRequest)(nil),        // 13: cdc.v1.RemoveSinkRequest
+	(*RemoveSinkResponse)(nil),       // 14: cdc.v1.RemoveSinkResponse
+	(*HealthCheckRequest)(nil),       // 15: cdc.v1.HealthCheckRequest
+	(*HealthCheckResponse)(nil),      // 16: cdc.v1.HealthCheckResponse
+	(*GetStatsRequest)(nil),          // 17: cdc.v1.GetStatsRequest
+	(*GetStatsResponse)(nil),         // 18: cdc.v1.GetStatsResponse
+	(*ComponentStats)(nil),           // 19: cdc.v1.ComponentStats
+	(*ListMessagesRequest)(nil),      // 20: cdc.v1.ListMessagesRequest
+	(*ListMessagesResponse)(nil),     // 21: cdc.v1.ListMessagesResponse
+	(*MessageItem)(nil),              // 22: cdc.v1.MessageItem
+	(*GetConsumerInfoRequest)(nil),   // 23: cdc.v1.GetConsumerInfoRequest
+	(*GetConsumerInfoResponse)(nil),  // 24: cdc.v1.GetConsumerInfoResponse
+	(*ListTopicsRequest)(nil),        // 25: cdc.v1.ListTopicsRequest
+	(*ListTopicsResponse)(nil),       // 26: cdc.v1.ListTopicsResponse
+	(*TopicSummary)(nil),             // 27: cdc.v1.TopicSummary
+	(*ListPartitionsRequest)(nil),    // 28: cdc.v1.ListPartitionsRequest
+	(*ListPartitionsResponse)(nil),   // 29: cdc.v1.ListPartitionsResponse
+	(*PartitionSummary)(nil),         // 30: cdc.v1.PartitionSummary
+	(*OffsetPaginationRequest)(nil),  // 31: cdc.v1.OffsetPaginationRequest
+	(*Sort)(nil),                     // 32: cdc.v1.Sort
+	(*OffsetPaginationResponse)(nil), // 33: cdc.v1.OffsetPaginationResponse
+	nil,                              // 34: cdc.v1.SinkConfig.IndexMappingEntry
+	nil,                              // 35: cdc.v1.GetStatsResponse.SourceStatsEntry
+	nil,                              // 36: cdc.v1.GetStatsResponse.SinkStatsEntry
+	nil,                              // 37: cdc.v1.MessageItem.HeadersEntry
 }
 var file_cdc_proto_depIdxs = []int32{
-	3,  // 0: cdc.v1.GetConfigResponse.config:type_name -> cdc.v1.AppConfig
-	4,  // 1: cdc.v1.AppConfig.sources:type_name -> cdc.v1.SourceConfig
-	5,  // 2: cdc.v1.AppConfig.sinks:type_name -> cdc.v1.SinkConfig
-	24, // 3: cdc.v1.SinkConfig.index_mapping:type_name -> cdc.v1.SinkConfig.IndexMappingEntry
-	4,  // 4: cdc.v1.AddSourceRequest.source:type_name -> cdc.v1.SourceConfig
-	5,  // 5: cdc.v1.AddSinkRequest.sink:type_name -> cdc.v1.SinkConfig
-	25, // 6: cdc.v1.GetStatsResponse.source_stats:type_name -> cdc.v1.GetStatsResponse.SourceStatsEntry
-	26, // 7: cdc.v1.GetStatsResponse.sink_stats:type_name -> cdc.v1.GetStatsResponse.SinkStatsEntry
+	4,  // 0: cdc.v1.GetConfigResponse.config:type_name -> cdc.v1.AppConfig
+	5,  // 1: cdc.v1.AppConfig.sources:type_name -> cdc.v1.SourceConfig
+	6,  // 2: cdc.v1.AppConfig.sinks:type_name -> cdc.v1.SinkConfig
+	34, // 3: cdc.v1.SinkConfig.index_mapping:type_name -> cdc.v1.SinkConfig.IndexMappingEntry
+	5,  // 4: cdc.v1.AddSourceRequest.source:type_name -> cdc.v1.SourceConfig
+	6,  // 5: cdc.v1.AddSinkRequest.sink:type_name -> cdc.v1.SinkConfig
+	35, // 6: cdc.v1.GetStatsResponse.source_stats:type_name -> cdc.v1.GetStatsResponse.SourceStatsEntry
+	36, // 7: cdc.v1.GetStatsResponse.sink_stats:type_name -> cdc.v1.GetStatsResponse.SinkStatsEntry
 	0,  // 8: cdc.v1.ListMessagesRequest.status:type_name -> cdc.v1.MessageStatus
-	21, // 9: cdc.v1.ListMessagesResponse.messages:type_name -> cdc.v1.MessageItem
-	27, // 10: cdc.v1.MessageItem.headers:type_name -> cdc.v1.MessageItem.HeadersEntry
-	18, // 11: cdc.v1.GetStatsResponse.SourceStatsEntry.value:type_name -> cdc.v1.ComponentStats
-	18, // 12: cdc.v1.GetStatsResponse.SinkStatsEntry.value:type_name -> cdc.v1.ComponentStats
-	14, // 13: cdc.v1.CDCService.HealthCheck:input_type -> cdc.v1.HealthCheckRequest
-	1,  // 14: cdc.v1.CDCService.GetConfig:input_type -> cdc.v1.GetConfigRequest
-	6,  // 15: cdc.v1.CDCService.AddSource:input_type -> cdc.v1.AddSourceRequest
-	8,  // 16: cdc.v1.CDCService.RemoveSource:input_type -> cdc.v1.RemoveSourceRequest
-	10, // 17: cdc.v1.CDCService.AddSink:input_type -> cdc.v1.AddSinkRequest
-	12, // 18: cdc.v1.CDCService.RemoveSink:input_type -> cdc.v1.RemoveSinkRequest
-	16, // 19: cdc.v1.CDCService.GetStats:input_type -> cdc.v1.GetStatsRequest
-	19, // 20: cdc.v1.CDCService.ListMessages:input_type -> cdc.v1.ListMessagesRequest
-	22, // 21: cdc.v1.CDCService.GetConsumerInfo:input_type -> cdc.v1.GetConsumerInfoRequest
-	15, // 22: cdc.v1.CDCService.HealthCheck:output_type -> cdc.v1.HealthCheckResponse
-	2,  // 23: cdc.v1.CDCService.GetConfig:output_type -> cdc.v1.GetConfigResponse
-	7,  // 24: cdc.v1.CDCService.AddSource:output_type -> cdc.v1.AddSourceResponse
-	9,  // 25: cdc.v1.CDCService.RemoveSource:output_type -> cdc.v1.RemoveSourceResponse
-	11, // 26: cdc.v1.CDCService.AddSink:output_type -> cdc.v1.AddSinkResponse
-	13, // 27: cdc.v1.CDCService.RemoveSink:output_type -> cdc.v1.RemoveSinkResponse
-	17, // 28: cdc.v1.CDCService.GetStats:output_type -> cdc.v1.GetStatsResponse
-	20, // 29: cdc.v1.CDCService.ListMessages:output_type -> cdc.v1.ListMessagesResponse
-	23, // 30: cdc.v1.CDCService.GetConsumerInfo:output_type -> cdc.v1.GetConsumerInfoResponse
-	22, // [22:31] is the sub-list for method output_type
-	13, // [13:22] is the sub-list for method input_type
-	13, // [13:13] is the sub-list for extension type_name
-	13, // [13:13] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	31, // 9: cdc.v1.ListMessagesRequest.pagination:type_name -> cdc.v1.OffsetPaginationRequest
+	22, // 10: cdc.v1.ListMessagesResponse.data:type_name -> cdc.v1.MessageItem
+	33, // 11: cdc.v1.ListMessagesResponse.pagination:type_name -> cdc.v1.OffsetPaginationResponse
+	37, // 12: cdc.v1.MessageItem.headers:type_name -> cdc.v1.MessageItem.HeadersEntry
+	31, // 13: cdc.v1.ListTopicsRequest.pagination:type_name -> cdc.v1.OffsetPaginationRequest
+	27, // 14: cdc.v1.ListTopicsResponse.data:type_name -> cdc.v1.TopicSummary
+	33, // 15: cdc.v1.ListTopicsResponse.pagination:type_name -> cdc.v1.OffsetPaginationResponse
+	31, // 16: cdc.v1.ListPartitionsRequest.pagination:type_name -> cdc.v1.OffsetPaginationRequest
+	30, // 17: cdc.v1.ListPartitionsResponse.data:type_name -> cdc.v1.PartitionSummary
+	33, // 18: cdc.v1.ListPartitionsResponse.pagination:type_name -> cdc.v1.OffsetPaginationResponse
+	32, // 19: cdc.v1.OffsetPaginationRequest.sort:type_name -> cdc.v1.Sort
+	1,  // 20: cdc.v1.Sort.order:type_name -> cdc.v1.SortOrder
+	32, // 21: cdc.v1.OffsetPaginationResponse.sort:type_name -> cdc.v1.Sort
+	19, // 22: cdc.v1.GetStatsResponse.SourceStatsEntry.value:type_name -> cdc.v1.ComponentStats
+	19, // 23: cdc.v1.GetStatsResponse.SinkStatsEntry.value:type_name -> cdc.v1.ComponentStats
+	15, // 24: cdc.v1.CDCService.HealthCheck:input_type -> cdc.v1.HealthCheckRequest
+	2,  // 25: cdc.v1.CDCService.GetConfig:input_type -> cdc.v1.GetConfigRequest
+	7,  // 26: cdc.v1.CDCService.AddSource:input_type -> cdc.v1.AddSourceRequest
+	9,  // 27: cdc.v1.CDCService.RemoveSource:input_type -> cdc.v1.RemoveSourceRequest
+	11, // 28: cdc.v1.CDCService.AddSink:input_type -> cdc.v1.AddSinkRequest
+	13, // 29: cdc.v1.CDCService.RemoveSink:input_type -> cdc.v1.RemoveSinkRequest
+	17, // 30: cdc.v1.CDCService.GetStats:input_type -> cdc.v1.GetStatsRequest
+	20, // 31: cdc.v1.CDCService.ListMessages:input_type -> cdc.v1.ListMessagesRequest
+	23, // 32: cdc.v1.CDCService.GetConsumerInfo:input_type -> cdc.v1.GetConsumerInfoRequest
+	25, // 33: cdc.v1.CDCService.ListTopics:input_type -> cdc.v1.ListTopicsRequest
+	28, // 34: cdc.v1.CDCService.ListPartitions:input_type -> cdc.v1.ListPartitionsRequest
+	16, // 35: cdc.v1.CDCService.HealthCheck:output_type -> cdc.v1.HealthCheckResponse
+	3,  // 36: cdc.v1.CDCService.GetConfig:output_type -> cdc.v1.GetConfigResponse
+	8,  // 37: cdc.v1.CDCService.AddSource:output_type -> cdc.v1.AddSourceResponse
+	10, // 38: cdc.v1.CDCService.RemoveSource:output_type -> cdc.v1.RemoveSourceResponse
+	12, // 39: cdc.v1.CDCService.AddSink:output_type -> cdc.v1.AddSinkResponse
+	14, // 40: cdc.v1.CDCService.RemoveSink:output_type -> cdc.v1.RemoveSinkResponse
+	18, // 41: cdc.v1.CDCService.GetStats:output_type -> cdc.v1.GetStatsResponse
+	21, // 42: cdc.v1.CDCService.ListMessages:output_type -> cdc.v1.ListMessagesResponse
+	24, // 43: cdc.v1.CDCService.GetConsumerInfo:output_type -> cdc.v1.GetConsumerInfoResponse
+	26, // 44: cdc.v1.CDCService.ListTopics:output_type -> cdc.v1.ListTopicsResponse
+	29, // 45: cdc.v1.CDCService.ListPartitions:output_type -> cdc.v1.ListPartitionsResponse
+	35, // [35:46] is the sub-list for method output_type
+	24, // [24:35] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_cdc_proto_init() }
@@ -1649,8 +2333,8 @@ func file_cdc_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cdc_proto_rawDesc), len(file_cdc_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   27,
+			NumEnums:      2,
+			NumMessages:   36,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

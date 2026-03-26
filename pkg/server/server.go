@@ -48,8 +48,7 @@ func NewAppServer(cfg ServerConfig, appCfg *config.Config, natsClient *nats.Clie
 
 // Start launches the gRPC server and the grpc-gateway REST proxy.
 func (s *AppServer) Start() error {
-
-	// ── 1. gRPC server ─────────────────────────────────────
+	// 1. gRPC server
 	s.grpcServer = grpc.NewServer()
 	cdcpb.RegisterCDCServiceServer(s.grpcServer, s.service)
 	reflection.Register(s.grpcServer) // grpcurl / grpc-web reflection
@@ -66,8 +65,7 @@ func (s *AppServer) Start() error {
 			slog.Error("gRPC server failed", "err", err)
 		}
 	}()
-
-	// ── 2. grpc-gateway REST proxy ─────────────────────────
+	// 2. grpc-gateway REST proxy
 	ctx := context.Background()
 	gwMux := runtime.NewServeMux()
 
@@ -113,8 +111,7 @@ func (s *AppServer) Stop() {
 	slog.Info("servers stopped")
 }
 
-// ─── CORS middleware ─────────────────────────────────────────────
-
+// CORS middleware
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")

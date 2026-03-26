@@ -221,6 +221,14 @@ func (s *ElasticSink) Type() string {
 	return constant.SinkTypeElasticsearch.String()
 }
 
+// Topic returns the NATS topic pattern this sink subscribes to
+func (s *ElasticSink) Topic() string {
+	if s.cfg.Topic != "" {
+		return s.cfg.Topic
+	}
+	return "cdc.>"
+}
+
 // InstanceID returns the unique identifier for this sink.
 func (s *ElasticSink) InstanceID() string {
 	return s.cfg.InstanceID

@@ -28,6 +28,8 @@ const (
 	CDCService_GetStats_FullMethodName        = "/cdc.v1.CDCService/GetStats"
 	CDCService_ListMessages_FullMethodName    = "/cdc.v1.CDCService/ListMessages"
 	CDCService_GetConsumerInfo_FullMethodName = "/cdc.v1.CDCService/GetConsumerInfo"
+	CDCService_ListTopics_FullMethodName      = "/cdc.v1.CDCService/ListTopics"
+	CDCService_ListPartitions_FullMethodName  = "/cdc.v1.CDCService/ListPartitions"
 )
 
 // CDCServiceClient is the client API for CDCService service.
@@ -48,6 +50,8 @@ type CDCServiceClient interface {
 	// Explorer API
 	ListMessages(ctx context.Context, in *ListMessagesRequest, opts ...grpc.CallOption) (*ListMessagesResponse, error)
 	GetConsumerInfo(ctx context.Context, in *GetConsumerInfoRequest, opts ...grpc.CallOption) (*GetConsumerInfoResponse, error)
+	ListTopics(ctx context.Context, in *ListTopicsRequest, opts ...grpc.CallOption) (*ListTopicsResponse, error)
+	ListPartitions(ctx context.Context, in *ListPartitionsRequest, opts ...grpc.CallOption) (*ListPartitionsResponse, error)
 }
 
 type cDCServiceClient struct {
@@ -148,6 +152,26 @@ func (c *cDCServiceClient) GetConsumerInfo(ctx context.Context, in *GetConsumerI
 	return out, nil
 }
 
+func (c *cDCServiceClient) ListTopics(ctx context.Context, in *ListTopicsRequest, opts ...grpc.CallOption) (*ListTopicsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListTopicsResponse)
+	err := c.cc.Invoke(ctx, CDCService_ListTopics_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *cDCServiceClient) ListPartitions(ctx context.Context, in *ListPartitionsRequest, opts ...grpc.CallOption) (*ListPartitionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListPartitionsResponse)
+	err := c.cc.Invoke(ctx, CDCService_ListPartitions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CDCServiceServer is the server API for CDCService service.
 // All implementations must embed UnimplementedCDCServiceServer
 // for forward compatibility.
@@ -166,6 +190,8 @@ type CDCServiceServer interface {
 	// Explorer API
 	ListMessages(context.Context, *ListMessagesRequest) (*ListMessagesResponse, error)
 	GetConsumerInfo(context.Context, *GetConsumerInfoRequest) (*GetConsumerInfoResponse, error)
+	ListTopics(context.Context, *ListTopicsRequest) (*ListTopicsResponse, error)
+	ListPartitions(context.Context, *ListPartitionsRequest) (*ListPartitionsResponse, error)
 	mustEmbedUnimplementedCDCServiceServer()
 }
 
@@ -202,6 +228,12 @@ func (UnimplementedCDCServiceServer) ListMessages(context.Context, *ListMessages
 }
 func (UnimplementedCDCServiceServer) GetConsumerInfo(context.Context, *GetConsumerInfoRequest) (*GetConsumerInfoResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetConsumerInfo not implemented")
+}
+func (UnimplementedCDCServiceServer) ListTopics(context.Context, *ListTopicsRequest) (*ListTopicsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListTopics not implemented")
+}
+func (UnimplementedCDCServiceServer) ListPartitions(context.Context, *ListPartitionsRequest) (*ListPartitionsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListPartitions not implemented")
 }
 func (UnimplementedCDCServiceServer) mustEmbedUnimplementedCDCServiceServer() {}
 func (UnimplementedCDCServiceServer) testEmbeddedByValue()                    {}
@@ -386,6 +418,42 @@ func _CDCService_GetConsumerInfo_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _CDCService_ListTopics_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListTopicsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CDCServiceServer).ListTopics(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CDCService_ListTopics_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CDCServiceServer).ListTopics(ctx, req.(*ListTopicsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CDCService_ListPartitions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListPartitionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CDCServiceServer).ListPartitions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CDCService_ListPartitions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CDCServiceServer).ListPartitions(ctx, req.(*ListPartitionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // CDCService_ServiceDesc is the grpc.ServiceDesc for CDCService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -428,6 +496,14 @@ var CDCService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetConsumerInfo",
 			Handler:    _CDCService_GetConsumerInfo_Handler,
+		},
+		{
+			MethodName: "ListTopics",
+			Handler:    _CDCService_ListTopics_Handler,
+		},
+		{
+			MethodName: "ListPartitions",
+			Handler:    _CDCService_ListPartitions_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

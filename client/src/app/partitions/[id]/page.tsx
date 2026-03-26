@@ -1,210 +1,54 @@
 "use client";
 
-import React, { useEffect, useState, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { formatBytes } from "@/lib/api";
-import { getPartitionAction, getMessagesAction } from "@/lib/actions";
-import type { PartitionDetail } from "@/lib/grpc";
+import Link from "next/link";
+import { ArrowLeft, MessageSquare, Network } from "lucide-react";
 
-interface MessageDisplay {
-  offset: number;
-  timestamp: number;
-  key: string;
-  value: string;
-}
-
-function decodeB64(val: string): string {
-  try {
-    return atob(val);
-  } catch {
-    return val;
-  }
-}
-
+/**
+ * The partition detail page (per-subject view) is intentionally minimal.
+ * The server's PartitionSummary only exposes {id, message_count, topic} —
+ * there is no per-partition detail endpoint.
+ *
+ * We redirect the user to the message browser filtered by this partition,
+ * which is the most useful action from here.
+ */
 export default function PartitionDetailPage() {
   const { id } = useParams();
   const router = useRouter();
-  const partitionId = parseInt(id as string, 10);
-
-  const [partition, setPartition] = useState<PartitionDetail | null>(null);
-  const [messages, setMessages] = useState<MessageDisplay[]>([]);
-  const [limit, setLimit] = useState(50);
-  const [expanded, setExpanded] = useState<number | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  const fetchData = useCallback(async () => {
-    try {
-      const [p, msgsData] = await Promise.all([
-        getPartitionAction(partitionId),
-        getMessagesAction(partitionId, 0, limit),
-      ]);
-      setPartition(p);
-      setMessages(msgsData.messages || []);
-    } catch (e) {
-      console.error("fetch partition detail:", e);
-    } finally {
-      setLoading(false);
-    }
-  }, [partitionId, limit]);
-
-  useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 5000);
-    return () => clearInterval(interval);
-  }, [fetchData]);
-
-  if (loading) return <div className="page-title">Loading partition {partitionId}...</div>;
-  if (!partition) return <div style={{ color: "var(--error)" }}>Partition not found</div>;
+  const partitionId = decodeURIComponent(id as string);
 
   return (
-    <div>
-      <div className="page-header">
-        <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
-          <button
-            className="btn"
-            style={{ width: "auto", padding: "8px 16px", background: "rgba(255,255,255,0.1)", color: "#fff" }}
-            onClick={() => router.back()}
-          >
-            ← Back
-          </button>
-          <h1 className="page-title" style={{ margin: 0 }}>Partition {partition.id}</h1>
+    <div className="space-y-6 animate-in fade-in duration-300">
+      {/* Header */}
+      <div className="flex items-center gap-4">
+        <button
+          onClick={() => router.back()}
+          className="p-2 rounded-lg border border-white/10 bg-white/[0.03] hover:bg-white/[0.08] transition-colors"
+        >
+          <ArrowLeft className="w-4 h-4 text-slate-300" />
+        </button>
+        <div>
+          <h1 className="text-2xl font-bold text-white flex items-center gap-2">
+            <Network className="w-6 h-6 text-emerald-400" />
+            <span className="font-mono text-emerald-300">{partitionId}</span>
+          </h1>
+          <p className="text-slate-400 text-sm mt-0.5">Partition / NATS Subject</p>
         </div>
       </div>
 
-      {/* Partition Stats */}
-      <section className="stats-grid" style={{ marginBottom: "40px" }}>
-        <div className="card stat-card">
-          <div className="stat-value">{partition.segmentCount}</div>
-          <div className="stat-label">Segments</div>
+      {/* CTA to message browser */}
+      <div className="p-6 rounded-xl border border-blue-500/20 bg-blue-500/5 flex items-center justify-between gap-4">
+        <div>
+          <div className="text-white font-semibold mb-1">Browse messages for this partition</div>
+          <div className="text-slate-400 text-sm font-mono">{partitionId}</div>
         </div>
-        <div className="card stat-card">
-          <div className="stat-value">{formatBytes(partition.sizeBytes)}</div>
-          <div className="stat-label">Total Size</div>
-        </div>
-        <div className="card stat-card">
-          <div className="stat-value" style={{ fontSize: "1.4rem" }}>{partition.earliestOffset}</div>
-          <div className="stat-label">Earliest Offset</div>
-        </div>
-        <div className="card stat-card">
-          <div className="stat-value" style={{ fontSize: "1.4rem" }}>{partition.latestOffset}</div>
-          <div className="stat-label">Latest Offset</div>
-        </div>
-      </section>
-
-      {/* Segments List */}
-      {partition.segments && partition.segments.length > 0 && (
-        <>
-          <h2 style={{ marginBottom: "16px" }}>Log Segments ({partition.segments.length})</h2>
-          <div className="table-container" style={{ marginBottom: "40px" }}>
-            <table>
-              <thead>
-                <tr>
-                  <th>BASE OFFSET</th>
-                  <th>SIZE</th>
-                </tr>
-              </thead>
-              <tbody>
-                {partition.segments.map((seg, i) => (
-                  <tr key={i}>
-                    <td style={{ fontFamily: "monospace" }}>{seg.baseOffset}</td>
-                    <td>{formatBytes(seg.sizeBytes)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </>
-      )}
-
-      {/* Messages */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "16px" }}>
-        <h2 style={{ margin: 0 }}>Messages ({messages.length})</h2>
-        <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
-          <label style={{ color: "var(--text-secondary)", fontSize: "0.9rem" }}>Limit:</label>
-          <select
-            value={limit}
-            onChange={(e) => setLimit(parseInt(e.target.value))}
-            style={{
-              background: "var(--panel-bg)",
-              border: "1px solid var(--border-color)",
-              color: "var(--text-primary)",
-              padding: "6px 12px",
-              borderRadius: "6px",
-              cursor: "pointer",
-            }}
-          >
-            <option value={20}>20</option>
-            <option value={50}>50</option>
-            <option value={100}>100</option>
-            <option value={200}>200</option>
-          </select>
-          <button
-            className="btn"
-            style={{ width: "auto", padding: "8px 16px" }}
-            onClick={fetchData}
-          >
-            ↻ Refresh
-          </button>
-        </div>
-      </div>
-
-      <div className="table-container">
-        <table>
-          <thead>
-            <tr>
-              <th>OFFSET</th>
-              <th>TIMESTAMP</th>
-              <th>KEY</th>
-              <th>VALUE PREVIEW</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {messages.length === 0 ? (
-              <tr>
-                <td colSpan={5} style={{ textAlign: "center", color: "var(--text-secondary)" }}>
-                  No messages in this partition yet.
-                </td>
-              </tr>
-            ) : (
-              messages.map((msg) => {
-                const rawValue = decodeB64(msg.value);
-                const isExpanded = expanded === msg.offset;
-                let parsed: string;
-                try {
-                  parsed = JSON.stringify(JSON.parse(rawValue), null, 2);
-                } catch {
-                  parsed = rawValue;
-                }
-
-                return (
-                  <React.Fragment key={msg.offset}>
-                    <tr style={{ cursor: "pointer" }} onClick={() => setExpanded(isExpanded ? null : msg.offset)}>
-                      <td style={{ fontFamily: "monospace", color: "var(--accent)" }}>{msg.offset}</td>
-                      <td style={{ fontSize: "0.85rem", color: "var(--text-secondary)" }}>
-                        {msg.timestamp ? new Date(msg.timestamp).toLocaleString() : "—"}
-                      </td>
-                      <td style={{ fontFamily: "monospace", fontSize: "0.85rem" }}>{msg.key || "—"}</td>
-                      <td style={{ maxWidth: "320px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "monospace", fontSize: "0.85rem", color: "var(--text-secondary)" }}>
-                        {(rawValue || "").substring(0, 120)}
-                      </td>
-                      <td style={{ color: "var(--accent)", fontSize: "0.85rem", whiteSpace: "nowrap" }}>
-                        {isExpanded ? "▲ Collapse" : "▼ Expand"}
-                      </td>
-                    </tr>
-                    {isExpanded && (
-                      <tr>
-                        <td colSpan={5} style={{ background: "rgba(1,4,9,0.6)", padding: "0" }}>
-                          <pre className="code-block" style={{ margin: "0", padding: "20px", borderRadius: "0" }}>{parsed}</pre>
-                        </td>
-                      </tr>
-                    )}
-                  </React.Fragment>
-                );
-              })
-            )}
-          </tbody>
-        </table>
+        <Link
+          href={`/messages?partition=${encodeURIComponent(partitionId)}`}
+          className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-blue-500/20 hover:bg-blue-500/30 border border-blue-400/30 text-blue-300 text-sm font-medium transition-colors whitespace-nowrap"
+        >
+          <MessageSquare className="w-4 h-4" />
+          Message Browser →
+        </Link>
       </div>
     </div>
   );

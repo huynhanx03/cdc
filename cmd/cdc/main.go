@@ -95,7 +95,6 @@ func main() {
 	engine := pipeline.NewEngine(
 		cfg.Pipeline.ChannelBufferSize,
 		cfg.Pipeline.WorkerCount,
-		cfg.Pipeline.SubjectFilter,
 		sourceList,
 		sinkList,
 		natsClient,

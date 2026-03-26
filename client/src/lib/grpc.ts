@@ -2,6 +2,37 @@ import * as grpc from '@grpc/grpc-js';
 import * as protoLoader from '@grpc/proto-loader';
 import path from 'path';
 
+// ── Proto loader ─────────────────────────────────────────────────────────────
+
+const PROTO_PATH = path.resolve(process.cwd(), '../api/proto/v1/cdc.proto');
+
+const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
+  keepCase: true,
+  longs: Number,
+  enums: String,
+  defaults: true,
+  oneofs: true,
+  includeDirs: [path.resolve(process.cwd(), '../third_party')],
+});
+
+const protoDescriptor = grpc.loadPackageDefinition(packageDefinition) as any;
+const cdcPackage = protoDescriptor.cdc.v1;
+
+const target = process.env.GRPC_API_URL || 'localhost:9090';
+
+// Singleton client — avoid creating a new one on every hot reload
+const globalForGrpc = global as unknown as { cdcClient: any };
+
+export const client =
+  globalForGrpc.cdcClient ||
+  new cdcPackage.CDCService(target, grpc.credentials.createInsecure());
+
+if (process.env.NODE_ENV !== 'production') {
+  globalForGrpc.cdcClient = client;
+}
+
+// ── Shared Types ─────────────────────────────────────────────────────────────
+
 export interface ComponentStats {
   success_count: number;
   failure_count: number;
@@ -16,23 +47,40 @@ export interface GetStatsResponse {
 export interface HealthCheckResponse {
   status: string;
   version: string;
-  uptime: number;
+  uptime: number; // seconds
 }
 
 export interface SourceConfig {
   type: string;
   host: string;
   port: number;
+  username?: string;
+  password?: string;
   database: string;
   tables: string[];
+  slot_name?: string;
+  publication_name?: string;
   instance_id?: string;
+  name?: string;
+  topic?: string;
 }
 
 export interface SinkConfig {
   type: string;
   url: string[];
+  username?: string;
+  password?: string;
   index_prefix?: string;
+  index?: string;
+  index_mapping?: Record<string, string>;
+  batch_size?: number;
+  flush_interval_ms?: number;
+  max_retries?: number;
+  retry_base_ms?: number;
+  api_key?: string;
   instance_id?: string;
+  name?: string;
+  topic?: string;
 }
 
 export interface AppConfig {
@@ -48,135 +96,117 @@ export interface GetConfigResponse {
   available_sinks: string[];
 }
 
-// ... existing code ...
+// ── Pagination Types ─────────────────────────────────────────────────────────
 
-export async function addSource(source: SourceConfig): Promise<string> {
-  return new Promise((resolve, reject) => {
-    client.AddSource({ source }, (err: grpc.ServiceError, response: any) => {
-      if (err) return reject(err);
-      resolve(response.instance_id);
-    });
-  });
+export interface PaginationResponse {
+  total_rows: number;
+  limit: number;
+  page: number;
+  has_next: boolean;
+  has_prev: boolean;
 }
 
-export async function removeSource(instance_id: string): Promise<boolean> {
-  return new Promise((resolve, reject) => {
-    client.RemoveSource({ instance_id }, (err: grpc.ServiceError, response: any) => {
-      if (err) return reject(err);
-      resolve(response.success);
-    });
-  });
-}
+// ── Explorer Types ────────────────────────────────────────────────────────────
 
-export async function addSink(sink: SinkConfig): Promise<string> {
-  return new Promise((resolve, reject) => {
-    client.AddSink({ sink }, (err: grpc.ServiceError, response: any) => {
-      if (err) return reject(err);
-      resolve(response.instance_id);
-    });
-  });
-}
-
-export async function removeSink(instance_id: string): Promise<boolean> {
-  return new Promise((resolve, reject) => {
-    client.RemoveSink({ instance_id }, (err: grpc.ServiceError, response: any) => {
-      if (err) return reject(err);
-      resolve(response.success);
-    });
-  });
+export interface TopicSummary {
+  name: string;
+  message_count: number;
+  partition_count: number;
 }
 
 export interface PartitionSummary {
-  id: number;
-  source_id: string;
-  total_messages: number;
-  last_sequence: number;
+  id: string;
+  message_count: number;
+  topic: string;
+}
+
+export interface MessageItem {
+  sequence: number;
+  timestamp: string; // ms since epoch as string
+  subject: string;
+  data: string; // base64 encoded bytes from grpc-gateway
+  headers: Record<string, string>;
+}
+
+export interface ListTopicsResponse {
+  data: TopicSummary[];
+  pagination: PaginationResponse;
 }
 
 export interface ListPartitionsResponse {
-  partitions: PartitionSummary[];
+  data: PartitionSummary[];
+  pagination: PaginationResponse;
 }
 
-export interface GetMessagesResponse {
-  messages: any[];
+export interface ListMessagesResponse {
+  data: MessageItem[];
   total_count: number;
+  pagination: PaginationResponse;
+}
+
+export interface ConsumerInfoResponse {
   ack_floor: number;
   pending_count: number;
 }
 
-export async function listPartitions(): Promise<ListPartitionsResponse> {
+// ── gRPC wrappers ─────────────────────────────────────────────────────────────
+
+function call<T>(method: string, req: unknown): Promise<T> {
   return new Promise((resolve, reject) => {
-    client.ListPartitions({}, (err: grpc.ServiceError, response: any) => {
+    client[method](req, (err: grpc.ServiceError, response: T) => {
       if (err) return reject(err);
       resolve(response);
     });
   });
 }
 
-export async function getMessages(source_id?: string, offset?: number, limit?: number, status?: number): Promise<GetMessagesResponse> {
-  return new Promise((resolve, reject) => {
-    client.GetMessages({ source_id, offset, limit, status }, (err: grpc.ServiceError, response: any) => {
-      if (err) return reject(err);
-      resolve(response);
-    });
+// Dashboard
+export const getStats = () => call<GetStatsResponse>('GetStats', {});
+export const healthCheck = () => call<HealthCheckResponse>('HealthCheck', {});
+export const getConfig = () => call<GetConfigResponse>('GetConfig', {});
+
+// Sources / Sinks
+export const addSource = (source: SourceConfig) =>
+  call<{ instance_id: string }>('AddSource', { source });
+export const removeSource = (instance_id: string) =>
+  call<{ success: boolean }>('RemoveSource', { instance_id });
+export const addSink = (sink: SinkConfig) =>
+  call<{ instance_id: string }>('AddSink', { sink });
+export const removeSink = (instance_id: string) =>
+  call<{ success: boolean }>('RemoveSink', { instance_id });
+
+// Topics
+export const listTopics = (limit = 20, page = 1) =>
+  call<ListTopicsResponse>('ListTopics', {
+    pagination: { limit, page },
   });
-}
 
-const PROTO_PATH = path.resolve(process.cwd(), '../api/proto/v1/cdc.proto');
-
-const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
-  keepCase: true,
-  longs: Number,
-  enums: String,
-  defaults: true,
-  oneofs: true,
-  includeDirs: [
-    path.resolve(process.cwd(), '../third_party')
-  ],
-});
-
-const protoDescriptor = grpc.loadPackageDefinition(packageDefinition) as any;
-const cdcPackage = protoDescriptor.cdc.v1;
-
-const target = process.env.GRPC_API_URL || 'localhost:9090';
-
-// In Next.js App Router, we avoid creating a new client on every hot reload in development
-const globalForGrpc = global as unknown as { cdcClient: any };
-
-export const client = globalForGrpc.cdcClient || new cdcPackage.CDCService(
-  target,
-  grpc.credentials.createInsecure()
-);
-
-if (process.env.NODE_ENV !== 'production') {
-  globalForGrpc.cdcClient = client;
-}
-
-// Promisified wrappers for gRPC methods
-
-export async function getStats(): Promise<GetStatsResponse> {
-  return new Promise((resolve, reject) => {
-    client.GetStats({}, (err: grpc.ServiceError, response: any) => {
-      if (err) return reject(err);
-      resolve(response);
-    });
+// Partitions
+export const listPartitions = (topic: string, limit = 50, page = 1) =>
+  call<ListPartitionsResponse>('ListPartitions', {
+    topic,
+    pagination: { limit, page },
   });
-}
 
-export async function healthCheck(): Promise<HealthCheckResponse> {
-  return new Promise((resolve, reject) => {
-    client.HealthCheck({}, (err: grpc.ServiceError, response: any) => {
-      if (err) return reject(err);
-      resolve(response);
-    });
+// Messages
+// status: 0=ALL, 1=SENT, 2=UNSENT
+export const listMessages = (params: {
+  status?: number;
+  topic?: string;
+  partition?: string;
+  limit?: number;
+  page?: number;
+}) =>
+  call<ListMessagesResponse>('ListMessages', {
+    status: params.status ?? 0,
+    topic: params.topic ?? '',
+    partition: params.partition ?? '',
+    pagination: {
+      limit: params.limit ?? 20,
+      page: params.page ?? 1,
+    },
   });
-}
 
-export async function getConfig(): Promise<GetConfigResponse> {
-  return new Promise((resolve, reject) => {
-    client.GetConfig({}, (err: grpc.ServiceError, response: any) => {
-      if (err) return reject(err);
-      resolve(response);
-    });
-  });
-}
+// Consumer
+export const getConsumerInfo = (consumer_name = '') =>
+  call<ConsumerInfoResponse>('GetConsumerInfo', { consumer_name });

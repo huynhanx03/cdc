@@ -31,6 +31,8 @@ type Sink interface {
 	Type() string
 	// InstanceID returns a unique identifier for this sink instance
 	InstanceID() string
+	// Topic returns the NATS topic pattern this sink subscribes to
+	Topic() string
 }
 // PipelineEngine defines the interface for managing the CDC pipeline at runtime
 type PipelineEngine interface {
@@ -39,6 +41,8 @@ type PipelineEngine interface {
 	AddSink(sink Sink)
 	RemoveSink(instanceID string) error
 	GetStats() (map[string]*models.ComponentStats, map[string]*models.ComponentStats)
-	ListMessages(ctx context.Context, status cdcpb.MessageStatus, offset uint64, limit int) ([]*models.Message, uint64, error)
+	ListMessages(ctx context.Context, status cdcpb.MessageStatus, limit int, page int, topic string, partition string) ([]*models.Message, uint64, error)
 	GetConsumerInfo(ctx context.Context, consumerName string) (uint64, uint64, error)
+	ListTopics(ctx context.Context, limit int, page int) ([]string, uint64, error)
+	ListPartitions(ctx context.Context, topic string, limit int, page int) ([]string, uint64, error)
 }

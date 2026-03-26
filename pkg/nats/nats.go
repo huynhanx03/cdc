@@ -58,6 +58,8 @@ func (c *Client) Publish(ctx context.Context, subject string, event *models.Even
 	}
 	if event.Offset != "" {
 		msg.Header.Set(constant.HeaderOffset, event.Offset)
+		// Set Msg ID for NATS deduplication: InstanceID + Offset is unique
+		msg.Header.Set("Nats-Msg-Id", fmt.Sprintf("%s-%s", event.InstanceID, event.Offset))
 	}
 
 	_, err = c.js.PublishMsg(ctx, msg)
@@ -103,6 +105,10 @@ func (c *Client) CreateOrUpdateConsumer(ctx context.Context, name string, filter
 		Durable:        name,
 		FilterSubjects: filterSubjects,
 		AckPolicy:      jetstream.AckExplicitPolicy,
+		// Ensure strict ordering: only 1 message in flight per consumer instance for this MVP
+		// In a real system, we'd partition by table and have 1 consumer per partition.
+		MaxDeliver:   -1,
+		ReplayPolicy: jetstream.ReplayInstantPolicy,
 	})
 }
 
@@ -159,8 +165,9 @@ func (c *Client) GetConsumerInfo(ctx context.Context, name string) (uint64, uint
 	return info.AckFloor.Stream, info.NumPending, nil
 }
 
-// ListMessages fetches messages from the stream within a sequence range
-func (c *Client) ListMessages(ctx context.Context, status models.MessageStatus, offset uint64, limit int) ([]*MessageItem, uint64, error) {
+// ListMessages fetches messages from the stream with page-based pagination and optional filters.
+// limit is max items per page, page is 1-indexed page number.
+func (c *Client) ListMessages(ctx context.Context, status models.MessageStatus, limit int, page int, topic string, partition string) ([]*MessageItem, uint64, error) {
 	stream, err := c.js.Stream(ctx, c.streamName)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to get stream: %w", err)
@@ -168,39 +175,63 @@ func (c *Client) ListMessages(ctx context.Context, status models.MessageStatus, 
 
 	ackFloor, _, err := c.GetConsumerInfo(ctx, "pipeline-worker")
 	if err != nil {
-		// If consumer doesn't exist yet, we can't filter SENT/UNSENT properly.
-		// For now, assume floor is 0 so everything is UNSENT if we can't find consumer.
 		ackFloor = 0
-	}
-
-	var messages []*MessageItem
-	currentSeq := offset
-	if currentSeq == 0 {
-		currentSeq = 1
 	}
 
 	info, _ := stream.Info(ctx)
 	total := info.State.Msgs
 
+	// Compute skip from page
+	skip := 0
+	if page > 1 && limit > 0 {
+		skip = (page - 1) * limit
+	}
+
+	var messages []*MessageItem
+	currentSeq := info.State.FirstSeq
+	if currentSeq == 0 {
+		currentSeq = 1
+	}
+
+	skipped := 0
 	for len(messages) < limit {
+		if currentSeq > info.State.LastSeq {
+			break
+		}
+
 		msg, err := stream.GetMsg(ctx, currentSeq)
 		if err != nil {
 			if err == jetstream.ErrMsgNotFound {
-				if currentSeq > info.State.LastSeq {
-					break
-				}
 				currentSeq++
 				continue
 			}
 			break
 		}
 
+		// Filter by topic/partition if provided
+		if topic != "" && !c.matchesTopic(msg.Subject, topic) {
+			currentSeq++
+			continue
+		}
+		if partition != "" && msg.Subject != partition {
+			currentSeq++
+			continue
+		}
+
+		// Filter by status
 		isSent := msg.Sequence <= ackFloor
 		if status == models.MessageStatusSent && !isSent {
 			currentSeq++
 			continue
 		}
 		if status == models.MessageStatusUnsent && isSent {
+			currentSeq++
+			continue
+		}
+
+		// Skip for page-based pagination
+		if skipped < skip {
+			skipped++
 			currentSeq++
 			continue
 		}
@@ -223,4 +254,102 @@ func (c *Client) ListMessages(ctx context.Context, status models.MessageStatus, 
 	}
 
 	return messages, total, nil
+}
+
+// ListTopics returns unique topic names from the stream's subjects with pagination
+func (c *Client) ListTopics(ctx context.Context, limit int, page int) ([]string, uint64, error) {
+	info, err := c.GetStreamInfo(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	uniqueTopics := make(map[string]bool)
+	for _, subject := range info.Config.Subjects {
+		topic := c.extractTopic(subject)
+		if topic != "" {
+			uniqueTopics[topic] = true
+		}
+	}
+
+	var topics []string
+	for t := range uniqueTopics {
+		topics = append(topics, t)
+	}
+
+	total := uint64(len(topics))
+
+	// Simple pagination
+	start := 0
+	if page > 1 && limit > 0 {
+		start = (page - 1) * limit
+	}
+	if start >= len(topics) {
+		return []string{}, total, nil
+	}
+	end := start + limit
+	if limit <= 0 || end > len(topics) {
+		end = len(topics)
+	}
+
+	return topics[start:end], total, nil
+}
+
+// ListPartitions returns all subjects matching a topic prefix with pagination
+func (c *Client) ListPartitions(ctx context.Context, topic string, limit int, page int) ([]string, uint64, error) {
+	info, err := c.GetStreamInfo(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	var partitions []string
+	prefix := "cdc." + topic + "."
+	if topic == "" {
+		prefix = "cdc."
+	}
+
+	for _, subject := range info.Config.Subjects {
+		if len(subject) > len(prefix) && subject[:len(prefix)] == prefix {
+			partitions = append(partitions, subject)
+		}
+	}
+
+	total := uint64(len(partitions))
+
+	// Simple pagination
+	start := 0
+	if page > 1 && limit > 0 {
+		start = (page - 1) * limit
+	}
+	if start >= len(partitions) {
+		return []string{}, total, nil
+	}
+	end := start + limit
+	if limit <= 0 || end > len(partitions) {
+		end = len(partitions)
+	}
+
+	return partitions[start:end], total, nil
+}
+
+func (c *Client) extractTopic(subject string) string {
+	// Simple extraction assuming "cdc.<topic>.<anything>"
+	// In a real system, this would be more robust.
+	var parts []string
+	start := 0
+	for i := 0; i < len(subject); i++ {
+		if subject[i] == '.' {
+			parts = append(parts, subject[start:i])
+			start = i + 1
+		}
+	}
+	parts = append(parts, subject[start:])
+
+	if len(parts) >= 2 && parts[0] == "cdc" {
+		return parts[1]
+	}
+	return ""
+}
+
+func (c *Client) matchesTopic(subject string, topic string) bool {
+	return c.extractTopic(subject) == topic
 }

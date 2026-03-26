@@ -43,11 +43,13 @@ func toSourceConfig(p *cdcpb.SourceConfig) (*config.SourceConfig, error) {
 		Port:            int(p.Port),
 		Database:        p.Database,
 		Tables:          p.Tables,
+		Topic:           p.GetTopic(),
 		Username:        p.GetUsername(),
 		Password:        p.GetPassword(),
 		SlotName:        p.GetSlotName(),
 		PublicationName: p.GetPublicationName(),
 		InstanceID:      p.GetInstanceId(),
+		Name:            p.GetName(),
 	}
 
 	// Apply defaults
@@ -82,6 +84,8 @@ func toSinkConfig(p *cdcpb.SinkConfig) (*config.SinkConfig, error) {
 		Username:        p.GetUsername(),
 		Password:        p.GetPassword(),
 		APIKey:          p.GetApiKey(),
+		Topic:           p.GetTopic(),
+		Name:            p.GetName(),
 		Index:           p.GetIndex(),
 		IndexMapping:    p.IndexMapping,
 		IndexPrefix:     p.GetIndexPrefix(),
@@ -121,9 +125,11 @@ func toSourceProto(c config.SourceConfig) *cdcpb.SourceConfig {
 		Password:        &c.Password,
 		Database:        c.Database,
 		Tables:          c.Tables,
+		Topic:           &c.Topic,
 		SlotName:        &c.SlotName,
 		PublicationName: &c.PublicationName,
 		InstanceId:      &c.InstanceID,
+		Name:            &c.Name,
 	}
 }
 
@@ -142,5 +148,15 @@ func toSinkProto(c config.SinkConfig) *cdcpb.SinkConfig {
 		MaxRetries:      &c.MaxRetries,
 		RetryBaseMs:     &c.RetryBaseMs,
 		ApiKey:          &c.APIKey,
+		Topic:           &c.Topic,
+		Name:            &c.Name,
+	}
+}
+
+func toPartitionProto(p, topic string) *cdcpb.PartitionSummary {
+	return &cdcpb.PartitionSummary{
+		Id:           p,
+		MessageCount: 0,
+		Topic:        topic,
 	}
 }

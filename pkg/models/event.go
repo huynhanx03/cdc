@@ -25,11 +25,14 @@ type Event struct {
 	LSN uint64 `json:"-"`
 	// Offset is the generic position in the source log (e.g. LSN or binlog file:pos)
 	Offset string `json:"offset,omitempty"`
+	// Topic to publish the event to
+	Topic string `json:"topic,omitempty"`
 }
 
 // NewEvent creates a new CDC event
-func NewEvent(op, instanceID, db, table string, before, after json.RawMessage, lsn uint64, offset string) *Event {
+func NewEvent(topic, op, instanceID, db, table string, before, after json.RawMessage, lsn uint64, offset string) *Event {
 	return &Event{
+		Topic:      topic,
 		Op:         op,
 		InstanceID: instanceID,
 		Database:   db,

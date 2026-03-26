@@ -1,38 +1,52 @@
 "use server";
 
-import * as grpcLib from './grpc';
+import * as grpc from "@/lib/grpc";
 
 export async function getStatsAction() {
-  return grpcLib.getStats();
+  return serialize(await grpc.getStats());
 }
 
 export async function healthCheckAction() {
-  return grpcLib.healthCheck();
+  return serialize(await grpc.healthCheck());
 }
 
 export async function getConfigAction() {
-  return grpcLib.getConfig();
+  return serialize(await grpc.getConfig());
 }
 
-export async function addSourceAction(source: grpcLib.SourceConfig) {
-  return grpcLib.addSource(source);
+export async function listTopicsAction(limit?: number, page?: number) {
+  return serialize(await grpc.listTopics(limit, page));
+}
+
+export async function listPartitionsAction(topic: string, limit?: number, page?: number) {
+  return serialize(await grpc.listPartitions(topic, limit, page));
+}
+
+function serialize(obj: any): any {
+  if (obj === null || obj === undefined) return obj;
+  if (obj instanceof Uint8Array || Buffer.isBuffer(obj)) {
+    return Buffer.from(obj).toString("base64");
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(serialize);
+  }
+  if (typeof obj === "object") {
+    return Object.fromEntries(
+      Object.entries(obj).map(([k, v]) => [k, serialize(v)])
+    );
+  }
+  return obj;
+}
+
+export async function listMessagesAction(topic?: string, partition?: string, limit?: number, page?: number) {
+  const res = await grpc.listMessages({ topic, partition, limit, page });
+  return serialize(res);
+}
+
+export async function addSourceAction(source: grpc.SourceConfig) {
+  return serialize(await grpc.addSource(source));
 }
 
 export async function removeSourceAction(instanceId: string) {
-  return grpcLib.removeSource(instanceId);
-}
-
-export async function addSinkAction(sink: grpcLib.SinkConfig) {
-  return grpcLib.addSink(sink);
-}
-
-export async function removeSinkAction(instanceId: string) {
-  return grpcLib.removeSink(instanceId);
-}
-export async function listPartitionsAction() {
-  return grpcLib.listPartitions();
-}
-
-export async function getMessagesAction(sourceId?: string, offset?: number, limit?: number, status?: number) {
-  return grpcLib.getMessages(sourceId, offset, limit, status);
+  return serialize(await grpc.removeSource(instanceId));
 }

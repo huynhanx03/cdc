@@ -387,7 +387,11 @@ func (p *PostgresSource) emitEvent(op string, rel *pglogrepl.RelationMessage, ol
 	before := decodeTupleAsJSON(rel, oldCols)
 	after := decodeTupleAsJSON(rel, newCols)
 	slog.Debug("cdc event", "op", op, "schema", rel.Namespace, "table", rel.RelationName)
-	p.pipeline <- models.NewEvent(op, p.cfg.InstanceID, rel.Namespace, rel.RelationName, before, after, lsn, strconv.FormatUint(lsn, 10))
+	topic := p.cfg.Topic
+	if topic == "" {
+		topic = "cdc"
+	}
+	p.pipeline <- models.NewEvent(topic, op, p.cfg.InstanceID, rel.Namespace, rel.RelationName, before, after, lsn, strconv.FormatUint(lsn, 10))
 }
 
 // escapeJSON safely escapes double quotes and backslashes in JSON strings.

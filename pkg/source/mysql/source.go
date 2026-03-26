@@ -58,7 +58,11 @@ func (s *MySQLSource) Start(pipeline chan<- *models.Event, ackCh <-chan uint64, 
 	cfg.User = s.cfg.Username
 	cfg.Password = s.cfg.Password
 	cfg.Charset = "utf8mb4"
-	cfg.Flavor = "mysql" // Or "mariadb" if needed
+	if s.cfg.Type == constant.SourceTypeMariaDB.String() {
+		cfg.Flavor = "mariadb"
+	} else {
+		cfg.Flavor = "mysql"
+	}
 
 	// Only include specified tables if the list is not empty
 	if len(s.cfg.Tables) > 0 {
@@ -183,7 +187,12 @@ func (h *eventHandler) OnRow(e *canal.RowsEvent) error {
 		pos := h.source.canal.SyncedPosition()
 		offset := fmt.Sprintf("%s:%d", pos.Name, pos.Pos)
 
+		topic := h.source.cfg.Topic
+		if topic == "" {
+			topic = "cdc"
+		}
 		h.source.pipeline <- models.NewEvent(
+			topic,
 			action,
 			h.source.cfg.InstanceID,
 			e.Table.Schema,
