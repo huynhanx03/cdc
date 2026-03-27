@@ -130,13 +130,13 @@ func (c *Config) applyDefaults() {
 	}
 
 	if c.UI.Port <= 0 {
-		c.UI.Port = 8080
+		c.UI.Port = 9092
 	}
 	if c.Server.GRPCPort <= 0 {
 		c.Server.GRPCPort = 9090
 	}
 	if c.Server.HTTPPort <= 0 {
-		c.Server.HTTPPort = 8080
+		c.Server.HTTPPort = 9091
 	}
 	for i := range c.Sinks {
 		if c.Sinks[i].InstanceID == "" {

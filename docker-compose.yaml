@@ -1,38 +1,32 @@
+version: '3.8'
+
 services:
-  nats:
+  nats-1:
     image: nats:latest
-    container_name: cdc-nats
+    container_name: nats-node-1
+    command: ["-js", "-m", "8222"]
     ports:
       - "4222:4222"
       - "8222:8222"
-    command: ["-js", "-m", "8222"]
     networks:
       - cdc-network
 
-  # postgres:
-  #   image: postgres:15-alpine
-  #   container_name: cdc-postgres
-  #   environment:
-  #     POSTGRES_USER: cdc_user
-  #     POSTGRES_PASSWORD: cdc_password
-  #     POSTGRES_DB: cdc_db
-  #   ports:
-  #     - "5432:5432"
-  #   command: ["postgres", "-c", "wal_level=logical"]
-  #   networks:
-  #     - cdc-network
-
-  # elasticsearch:
-  #   image: docker.elastic.co/elasticsearch/elasticsearch:8.10.4
-  #   container_name: cdc-elasticsearch
-  #   environment:
-  #     - discovery.type=single-node
-  #     - xpack.security.enabled=false
-  #     - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
-  #   ports:
-  #     - "9200:9200"
-  #   networks:
-  #     - cdc-network
+  # --- CDC Application (Backend + UI) ---
+  cdc-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cdc-app
+    ports:
+      - "9090:9090"   # gRPC API
+      - "9091:9091"   # REST API
+      - "9092:9092"   # UI
+    volumes:
+      - ./config.yaml:/app/config.yaml
+    depends_on:
+      - nats-1
+    networks:
+      - cdc-network
 
 networks:
   cdc-network:
