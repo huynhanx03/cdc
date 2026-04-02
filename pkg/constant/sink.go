@@ -5,6 +5,8 @@ type SinkType string
 const (
 	SinkTypeElasticsearch SinkType = "elasticsearch"
 	SinkTypeStdout        SinkType = "stdout"
+	SinkTypePostgres      SinkType = "postgres"
+	SinkTypeWebhook       SinkType = "webhook"
 )
 
 func (s SinkType) String() string {

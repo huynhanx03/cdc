@@ -33,6 +33,8 @@ type Sink interface {
 	InstanceID() string
 	// Topic returns the NATS topic pattern this sink subscribes to
 	Topic() string
+	// MaxRetries returns the maximum number of delivery attempts before DLQ
+	MaxRetries() int32
 }
 // PipelineEngine defines the interface for managing the CDC pipeline at runtime
 type PipelineEngine interface {

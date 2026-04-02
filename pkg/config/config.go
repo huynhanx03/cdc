@@ -1,8 +1,12 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 
+	"github.com/google/cel-go/cel"
+	"github.com/google/cel-go/common/types"
+	"github.com/google/cel-go/common/types/ref"
 	"github.com/spf13/viper"
 )
 
@@ -32,6 +36,10 @@ type SourceConfig struct {
 	Tables          []string `mapstructure:"tables"`
 	SlotName        string   `mapstructure:"slot_name"`
 	PublicationName string   `mapstructure:"publication_name"`
+	SnapshotMode      string            `mapstructure:"snapshot_mode" json:"snapshot_mode,omitempty"`
+	URL               string            `mapstructure:"url" json:"url,omitempty"`
+	Headers           map[string]string `mapstructure:"headers" json:"headers,omitempty"`
+	PollingIntervalMs int               `mapstructure:"polling_interval_ms" json:"polling_interval_ms,omitempty"`
 }
 
 // PipelineConfig holds the configuration for the CDC pipeline.
@@ -60,11 +68,18 @@ type SinkConfig struct {
 	Type            string            `mapstructure:"type"`
 	Topic           string            `mapstructure:"topic"`
 	URL             []string          `mapstructure:"url"`
+	Host            string            `mapstructure:"host"`
+	Port            int               `mapstructure:"port"`
+	Database        string            `mapstructure:"database"`
 	Username        string            `mapstructure:"username"`
 	Password        string            `mapstructure:"password"`
 	APIKey          string            `mapstructure:"api_key"`
+	Headers         map[string]string `mapstructure:"headers"`
 	Index           string            `mapstructure:"index"`
 	IndexMapping    map[string]string `mapstructure:"index_mapping"`
+	FieldMapping    map[string]string `mapstructure:"field_mapping" json:"field_mapping,omitempty"`
+	Transformations map[string]string `mapstructure:"transformations" json:"transformations,omitempty"`
+	PrimaryKeys     map[string]string `mapstructure:"primary_keys" json:"primary_keys,omitempty"`
 	IndexPrefix     string            `mapstructure:"index_prefix"`
 	BatchSize       int32             `mapstructure:"batch_size"`
 	FlushIntervalMs int32             `mapstructure:"flush_interval_ms"`
@@ -123,6 +138,9 @@ func (c *Config) applyDefaults() {
 		}
 		if c.Sources[i].InstanceID == "" {
 			c.Sources[i].InstanceID = fmt.Sprintf("source_%d", i)
+		}
+		if c.Sources[i].PollingIntervalMs <= 0 {
+			c.Sources[i].PollingIntervalMs = 5000 // default 5 seconds
 		}
 	}
 	if len(c.Pipeline.SubjectFilter) == 0 {
@@ -191,4 +209,62 @@ func (c *Config) validate() error {
 		return fmt.Errorf("at least one sink is required")
 	}
 	return nil
+}
+
+// ApplyFieldMapping applies the configured field mapping and CEL transformations to the given JSON data.
+func (s *SinkConfig) ApplyFieldMapping(data []byte) ([]byte, error) {
+	if len(s.FieldMapping) == 0 && len(s.Transformations) == 0 {
+		return data, nil
+	}
+
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal for mapping: %w", err)
+	}
+
+	// 1. apply simple renaming mapping
+	for srcField, targetField := range s.FieldMapping {
+		if val, ok := m[srcField]; ok {
+			m[targetField] = val
+			delete(m, srcField)
+		}
+	}
+
+	// 2. apply CEL transformations if any
+	if len(s.Transformations) > 0 {
+		env, err := cel.NewEnv(
+			cel.Variable("data", cel.MapType(cel.StringType, cel.AnyType)),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create CEL env: %w", err)
+		}
+
+		for field, expr := range s.Transformations {
+			ast, iss := env.Compile(expr)
+			if iss.Err() != nil {
+				return nil, fmt.Errorf("CEL compile error for field %s: %v", field, iss.Err())
+			}
+			program, err := env.Program(ast)
+			if err != nil {
+				return nil, fmt.Errorf("CEL program error for field %s: %w", field, err)
+			}
+
+			out, _, err := program.Eval(map[string]interface{}{"data": m})
+			if err != nil {
+				return nil, fmt.Errorf("CEL eval error for field %s: %w", field, err)
+			}
+
+			// Convert CEL output back to native Go
+			m[field] = out.Value()
+			if v, ok := out.Value().(ref.Val); ok {
+				m[field] = v.Value()
+			} else if out == types.True {
+				m[field] = true
+			} else if out == types.False {
+				m[field] = false
+			}
+		}
+	}
+
+	return json.Marshal(m)
 }

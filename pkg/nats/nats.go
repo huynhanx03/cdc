@@ -70,6 +70,42 @@ func (c *Client) Publish(ctx context.Context, subject string, event *models.Even
 	return nil
 }
 
+// PublishRaw sends raw data to a NATS subject with optional headers.
+func (c *Client) PublishRaw(ctx context.Context, subject string, data []byte, headers nats.Header) error {
+	msg := &nats.Msg{
+		Subject: subject,
+		Data:    data,
+		Header:  headers,
+	}
+
+	_, err := c.js.PublishMsg(ctx, msg)
+	if err != nil {
+		return fmt.Errorf("failed to publish raw to NATS: %w", err)
+	}
+
+	return nil
+}
+
+// MoveToDLQ pushes a message to a dead-letter-queue subject and ACKs the original.
+func (c *Client) MoveToDLQ(ctx context.Context, msg jetstream.Msg, reason string) error {
+	origSubject := msg.Subject()
+	dlqSubject := fmt.Sprintf("dlq.%s", origSubject)
+
+	headers := msg.Headers()
+	if headers == nil {
+		headers = make(nats.Header)
+	}
+	headers.Set("X-DLQ-Reason", reason)
+	headers.Set("X-DLQ-Original-Subject", origSubject)
+	headers.Set("X-DLQ-Timestamp", time.Now().Format(time.RFC3339))
+
+	if _, err := c.js.Publish(ctx, dlqSubject, msg.Data(), jetstream.WithMsgID(headers.Get("Nats-Msg-Id"))); err != nil {
+		return fmt.Errorf("failed to move to DLQ: %w", err)
+	}
+
+	return msg.Ack()
+}
+
 // Close closes the NATS connection
 func (c *Client) Close() {
 	if c.nc != nil {

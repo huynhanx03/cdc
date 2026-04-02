@@ -76,3 +76,11 @@ func (s *StdoutSink) Topic() string {
 func (s *StdoutSink) InstanceID() string {
 	return s.instanceID
 }
+
+// MaxRetries returns the maximum number of delivery attempts.
+func (s *StdoutSink) MaxRetries() int32 {
+	if s.cfg.MaxRetries <= 0 {
+		return 3 // Default
+	}
+	return s.cfg.MaxRetries
+}

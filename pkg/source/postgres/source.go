@@ -74,7 +74,79 @@ func (p *PostgresSource) Start(pipeline chan<- *models.Event, ackCh <-chan uint6
 		}
 	}
 
+	if p.shouldSnapshot(initialOffset) {
+		if err := p.runSnapshot(context.Background()); err != nil {
+			return fmt.Errorf("snapshot failed: %w", err)
+		}
+	}
+
 	return p.connectAndStartReplication(ackCh, pglogrepl.LSN(startLSN))
+}
+
+func (p *PostgresSource) shouldSnapshot(offset string) bool {
+	mode := strings.ToLower(p.cfg.SnapshotMode)
+	if mode == "always" {
+		return true
+	}
+	if mode == "initial" && offset == "" {
+		return true
+	}
+	return false
+}
+
+func (p *PostgresSource) runSnapshot(ctx context.Context) error {
+	slog.Info("starting snapshot", "instance", p.cfg.InstanceID, "tables", p.cfg.Tables)
+
+	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s",
+		p.cfg.Username, p.cfg.Password, p.cfg.Host, p.cfg.Port, p.cfg.Database)
+	conn, err := pgx.Connect(ctx, connStr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close(ctx)
+
+	for _, tableName := range p.cfg.Tables {
+		rows, err := conn.Query(ctx, fmt.Sprintf("SELECT * FROM %s", tableName))
+		if err != nil {
+			slog.Error("snapshot query failed", "table", tableName, "err", err)
+			continue
+		}
+
+		schema := "public"
+		table := tableName
+		if strings.Contains(tableName, ".") {
+			parts := strings.SplitN(tableName, ".", 2)
+			schema = parts[0]
+			table = parts[1]
+		}
+
+		fields := rows.FieldDescriptions()
+		count := 0
+		for rows.Next() {
+			vals, err := rows.Values()
+			if err != nil {
+				slog.Error("read snapshot row failed", "table", tableName, "err", err)
+				continue
+			}
+
+			obj := make(map[string]interface{})
+			for i, field := range fields {
+				obj[field.Name] = vals[i]
+			}
+			after, _ := json.Marshal(obj)
+
+			topic := p.cfg.Topic
+			if topic == "" {
+				topic = "cdc"
+			}
+			p.pipeline <- models.NewEvent(topic, constant.SnapshotAction.String(), p.cfg.InstanceID, schema, table, nil, after, 0, "snapshot")
+			count++
+		}
+		rows.Close()
+		slog.Info("snapshot table completed", "table", tableName, "rows", count)
+	}
+	slog.Info("snapshot process finished")
+	return nil
 }
 
 // Stop gracefully stops the replication stream and closes the connection.

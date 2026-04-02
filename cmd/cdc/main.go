@@ -19,9 +19,12 @@ import (
 
 	_ "github.com/foden/cdc/pkg/source/mysql"
 	_ "github.com/foden/cdc/pkg/source/postgres"
+	_ "github.com/foden/cdc/pkg/source/rest"
 
 	_ "github.com/foden/cdc/pkg/sink/elasticsearch"
 	_ "github.com/foden/cdc/pkg/sink/stdout"
+	_ "github.com/foden/cdc/pkg/sink/postgres"
+	_ "github.com/foden/cdc/pkg/sink/webhook"
 )
 
 func main() {

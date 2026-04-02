@@ -9,6 +9,7 @@ import {
   Settings, 
   Zap,
   Activity,
+  BarChart3,
   Box
 } from "lucide-react";
 
@@ -21,6 +22,7 @@ interface NavItem {
 const navItems: NavItem[] = [
   { label: "Dashboard", href: "/", icon: LayoutDashboard },
   { label: "Topics", href: "/topics", icon: Layers },
+  { label: "Performance", href: "/metrics", icon: BarChart3 },
   { label: "Partitions", href: "/partitions", icon: Grid2X2 },
   { label: "Messages", href: "/messages", icon: MessageSquare },
   { label: "System Config", href: "/config", icon: Settings },

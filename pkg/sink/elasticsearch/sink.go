@@ -95,7 +95,13 @@ func (s *ElasticSink) Write(event *models.Event) error {
 	if event.Op == constant.DeleteAction.String() {
 		s.writeDeleteAction(index, docID)
 	} else {
-		s.writeIndexAction(index, docID, docMap)
+		mappedDoc, err := s.cfg.ApplyFieldMapping(docMap)
+		if err != nil {
+			slog.Warn("field mapping application failed", "err", err, "index", index, "id", docID)
+			s.writeIndexAction(index, docID, docMap) // write original
+		} else {
+			s.writeIndexAction(index, docID, mappedDoc)
+		}
 	}
 
 	s.pending++
@@ -232,6 +238,14 @@ func (s *ElasticSink) Topic() string {
 // InstanceID returns the unique identifier for this sink.
 func (s *ElasticSink) InstanceID() string {
 	return s.cfg.InstanceID
+}
+
+// MaxRetries returns the maximum number of delivery attempts.
+func (s *ElasticSink) MaxRetries() int32 {
+	if s.cfg.MaxRetries <= 0 {
+		return 3 // Default
+	}
+	return s.cfg.MaxRetries
 }
 
 // newClient builds and pings the ES client.

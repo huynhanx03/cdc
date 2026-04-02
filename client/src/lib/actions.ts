@@ -10,6 +10,18 @@ export async function healthCheckAction() {
   return serialize(await grpc.healthCheck());
 }
 
+export async function getPrometheusMetricsAction() {
+  const url = process.env.METRICS_URL || "http://localhost:9091/metrics";
+  try {
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.text();
+  } catch (err) {
+    console.error("fetch metrics:", err);
+    return "";
+  }
+}
+
 export async function getConfigAction() {
   return serialize(await grpc.getConfig());
 }

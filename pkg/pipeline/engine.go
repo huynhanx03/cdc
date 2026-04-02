@@ -14,6 +14,7 @@ import (
 	"github.com/foden/cdc/pkg/interfaces"
 	"github.com/foden/cdc/pkg/models"
 	"github.com/foden/cdc/pkg/nats"
+	"github.com/foden/cdc/pkg/metrics"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -72,6 +73,7 @@ func (e *Engine) Start() error {
 	// 1. Pipeline Producer (Reads from eventCh, writes to NATS)
 	e.wg.Add(1)
 	go e.producer()
+	metrics.ActiveWorkers.WithLabelValues("producer").Inc()
 
 	// 2. Start workers for existing sinks
 	e.mu.Lock()
@@ -138,6 +140,7 @@ func (e *Engine) startSinkWorkersUnlocked(sink interfaces.Sink) {
 	for i := 0; i < e.partitionCount; i++ {
 		e.wg.Add(1)
 		go e.worker(ctx, sink, i)
+		metrics.ActiveWorkers.WithLabelValues(fmt.Sprintf("worker-%s", sink.InstanceID())).Inc()
 	}
 }
 
@@ -216,10 +219,23 @@ func (e *Engine) worker(ctx context.Context, sink interfaces.Sink, partID int) {
 		}
 
 		// Process event on this specific sink
+		start := time.Now()
 		if err := sink.Write(&ev); err != nil {
 			slog.Error("sink write error", "worker_id", partID, "instance_id", ev.InstanceID, "table", ev.Table, _nameErr, err)
 			e.updateSinkStats(sink.InstanceID(), false, err.Error())
 			
+			// If max retries reached, move to DLQ instead of infinite retry loop
+			if meta, _ := msg.Metadata(); meta != nil && int32(meta.NumDelivered) >= sink.MaxRetries() {
+				slog.Warn("max retries reached, moving to DLQ", "instance_id", ev.InstanceID, "table", ev.Table, "num_delivered", meta.NumDelivered)
+				if errDLQ := e.natsClient.MoveToDLQ(ctx, msg, fmt.Sprintf("sink_error: %s", err.Error())); errDLQ != nil {
+					slog.Error("failed to move to DLQ", _nameErr, errDLQ)
+					msg.Nak() // Fallback to retry if DLQ failed
+				} else {
+					metrics.DLQEventsTotal.WithLabelValues(ev.InstanceID, sink.InstanceID(), "max_retries").Inc()
+				}
+				continue // MoveToDLQ already ACKs the message
+			}
+
 			// Immediately NAK this message and the current batch to trigger retry
 			msg.Nak()
 			for _, m := range pendingMsgs {
@@ -228,6 +244,10 @@ func (e *Engine) worker(ctx context.Context, sink interfaces.Sink, partID int) {
 			pendingMsgs = nil
 			pendingLSNs = nil
 		} else {
+			duration := time.Since(start)
+			metrics.SinkWriteDuration.WithLabelValues(sink.InstanceID(), sink.Type()).Observe(duration.Seconds())
+			metrics.WorkerProcessDuration.WithLabelValues(sink.InstanceID()).Observe(duration.Seconds())
+
 			e.updateSinkStats(sink.InstanceID(), true, "")
 
 			// Collect metadata for background acknowledgement and offset persistence
@@ -495,9 +515,12 @@ func (e *Engine) updateSourceStats(instanceID string, success bool, errStr strin
 	}
 	if success {
 		e.sourceStats[instanceID].SuccessCount++
+		metrics.EventsProducedTotal.WithLabelValues(instanceID, "success").Inc()
 	} else {
 		e.sourceStats[instanceID].FailureCount++
 		e.sourceStats[instanceID].LastError = errStr
+		metrics.EventsProducedTotal.WithLabelValues(instanceID, "failure").Inc()
+		metrics.SourceErrorsTotal.WithLabelValues(instanceID, errStr).Inc()
 	}
 }
 
@@ -511,9 +534,12 @@ func (e *Engine) updateSinkStats(sinkID string, success bool, errStr string) {
 	}
 	if success {
 		e.sinkStats[sinkID].SuccessCount++
+		metrics.EventsConsumedTotal.WithLabelValues(sinkID, "success").Inc()
 	} else {
 		e.sinkStats[sinkID].FailureCount++
 		e.sinkStats[sinkID].LastError = errStr
+		metrics.EventsConsumedTotal.WithLabelValues(sinkID, "failure").Inc()
+		metrics.SinkErrorsTotal.WithLabelValues("", sinkID, errStr).Inc()
 	}
 }
 // ListMessages returns messages from NATS with classification and optional filters

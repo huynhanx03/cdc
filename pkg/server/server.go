@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/reflection"
@@ -74,8 +75,18 @@ func (s *AppServer) Start() error {
 		return fmt.Errorf("grpc-gateway register: %w", err)
 	}
 
+	// Expose prometheus metrics and health check endpoint
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"up"}`))
+	})
+	mux.Handle("/", gwMux)
+
 	// Wrap with CORS middleware for Next.js frontend
-	handler := corsMiddleware(gwMux)
+	handler := corsMiddleware(mux)
 
 	httpAddr := fmt.Sprintf(":%d", s.cfg.HTTPPort)
 	s.httpServer = &http.Server{

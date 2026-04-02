@@ -434,6 +434,7 @@ type SinkConfig struct {
 	InstanceId      *string                `protobuf:"bytes,13,opt,name=instance_id,json=instanceId,proto3,oneof" json:"instance_id,omitempty"` // Unique ID for sink
 	Name            *string                `protobuf:"bytes,14,opt,name=name,proto3,oneof" json:"name,omitempty"`                               // Display name
 	Topic           *string                `protobuf:"bytes,15,opt,name=topic,proto3,oneof" json:"topic,omitempty"`                             // Routing topic
+	FieldMapping    map[string]string      `protobuf:"bytes,16,rep,name=field_mapping,json=fieldMapping,proto3" json:"field_mapping,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -571,6 +572,13 @@ func (x *SinkConfig) GetTopic() string {
 		return *x.Topic
 	}
 	return ""
+}
+
+func (x *SinkConfig) GetFieldMapping() map[string]string {
+	if x != nil {
+		return x.FieldMapping
+	}
+	return nil
 }
 
 // Dynamic Operations
@@ -2032,7 +2040,7 @@ const file_cdc_proto_rawDesc = "" +
 	"\x11_publication_nameB\x0e\n" +
 	"\f_instance_idB\a\n" +
 	"\x05_nameB\b\n" +
-	"\x06_topic\"\x8a\x06\n" +
+	"\x06_topic\"\x96\a\n" +
 	"\n" +
 	"SinkConfig\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x10\n" +
@@ -2054,8 +2062,12 @@ const file_cdc_proto_rawDesc = "" +
 	"instanceId\x88\x01\x01\x12\x17\n" +
 	"\x04name\x18\x0e \x01(\tH\n" +
 	"R\x04name\x88\x01\x01\x12\x19\n" +
-	"\x05topic\x18\x0f \x01(\tH\vR\x05topic\x88\x01\x01\x1a?\n" +
+	"\x05topic\x18\x0f \x01(\tH\vR\x05topic\x88\x01\x01\x12I\n" +
+	"\rfield_mapping\x18\x10 \x03(\v2$.cdc.v1.SinkConfig.FieldMappingEntryR\ffieldMapping\x1a?\n" +
 	"\x11IndexMappingEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a?\n" +
+	"\x11FieldMappingEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\v\n" +
 	"\t_usernameB\v\n" +
@@ -2225,7 +2237,7 @@ func file_cdc_proto_rawDescGZIP() []byte {
 }
 
 var file_cdc_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_cdc_proto_msgTypes = make([]protoimpl.MessageInfo, 36)
+var file_cdc_proto_msgTypes = make([]protoimpl.MessageInfo, 37)
 var file_cdc_proto_goTypes = []any{
 	(MessageStatus)(0),               // 0: cdc.v1.MessageStatus
 	(SortOrder)(0),                   // 1: cdc.v1.SortOrder
@@ -2262,62 +2274,64 @@ var file_cdc_proto_goTypes = []any{
 	(*Sort)(nil),                     // 32: cdc.v1.Sort
 	(*OffsetPaginationResponse)(nil), // 33: cdc.v1.OffsetPaginationResponse
 	nil,                              // 34: cdc.v1.SinkConfig.IndexMappingEntry
-	nil,                              // 35: cdc.v1.GetStatsResponse.SourceStatsEntry
-	nil,                              // 36: cdc.v1.GetStatsResponse.SinkStatsEntry
-	nil,                              // 37: cdc.v1.MessageItem.HeadersEntry
+	nil,                              // 35: cdc.v1.SinkConfig.FieldMappingEntry
+	nil,                              // 36: cdc.v1.GetStatsResponse.SourceStatsEntry
+	nil,                              // 37: cdc.v1.GetStatsResponse.SinkStatsEntry
+	nil,                              // 38: cdc.v1.MessageItem.HeadersEntry
 }
 var file_cdc_proto_depIdxs = []int32{
 	4,  // 0: cdc.v1.GetConfigResponse.config:type_name -> cdc.v1.AppConfig
 	5,  // 1: cdc.v1.AppConfig.sources:type_name -> cdc.v1.SourceConfig
 	6,  // 2: cdc.v1.AppConfig.sinks:type_name -> cdc.v1.SinkConfig
 	34, // 3: cdc.v1.SinkConfig.index_mapping:type_name -> cdc.v1.SinkConfig.IndexMappingEntry
-	5,  // 4: cdc.v1.AddSourceRequest.source:type_name -> cdc.v1.SourceConfig
-	6,  // 5: cdc.v1.AddSinkRequest.sink:type_name -> cdc.v1.SinkConfig
-	35, // 6: cdc.v1.GetStatsResponse.source_stats:type_name -> cdc.v1.GetStatsResponse.SourceStatsEntry
-	36, // 7: cdc.v1.GetStatsResponse.sink_stats:type_name -> cdc.v1.GetStatsResponse.SinkStatsEntry
-	0,  // 8: cdc.v1.ListMessagesRequest.status:type_name -> cdc.v1.MessageStatus
-	31, // 9: cdc.v1.ListMessagesRequest.pagination:type_name -> cdc.v1.OffsetPaginationRequest
-	22, // 10: cdc.v1.ListMessagesResponse.data:type_name -> cdc.v1.MessageItem
-	33, // 11: cdc.v1.ListMessagesResponse.pagination:type_name -> cdc.v1.OffsetPaginationResponse
-	37, // 12: cdc.v1.MessageItem.headers:type_name -> cdc.v1.MessageItem.HeadersEntry
-	31, // 13: cdc.v1.ListTopicsRequest.pagination:type_name -> cdc.v1.OffsetPaginationRequest
-	27, // 14: cdc.v1.ListTopicsResponse.data:type_name -> cdc.v1.TopicSummary
-	33, // 15: cdc.v1.ListTopicsResponse.pagination:type_name -> cdc.v1.OffsetPaginationResponse
-	31, // 16: cdc.v1.ListPartitionsRequest.pagination:type_name -> cdc.v1.OffsetPaginationRequest
-	30, // 17: cdc.v1.ListPartitionsResponse.data:type_name -> cdc.v1.PartitionSummary
-	33, // 18: cdc.v1.ListPartitionsResponse.pagination:type_name -> cdc.v1.OffsetPaginationResponse
-	32, // 19: cdc.v1.OffsetPaginationRequest.sort:type_name -> cdc.v1.Sort
-	1,  // 20: cdc.v1.Sort.order:type_name -> cdc.v1.SortOrder
-	32, // 21: cdc.v1.OffsetPaginationResponse.sort:type_name -> cdc.v1.Sort
-	19, // 22: cdc.v1.GetStatsResponse.SourceStatsEntry.value:type_name -> cdc.v1.ComponentStats
-	19, // 23: cdc.v1.GetStatsResponse.SinkStatsEntry.value:type_name -> cdc.v1.ComponentStats
-	15, // 24: cdc.v1.CDCService.HealthCheck:input_type -> cdc.v1.HealthCheckRequest
-	2,  // 25: cdc.v1.CDCService.GetConfig:input_type -> cdc.v1.GetConfigRequest
-	7,  // 26: cdc.v1.CDCService.AddSource:input_type -> cdc.v1.AddSourceRequest
-	9,  // 27: cdc.v1.CDCService.RemoveSource:input_type -> cdc.v1.RemoveSourceRequest
-	11, // 28: cdc.v1.CDCService.AddSink:input_type -> cdc.v1.AddSinkRequest
-	13, // 29: cdc.v1.CDCService.RemoveSink:input_type -> cdc.v1.RemoveSinkRequest
-	17, // 30: cdc.v1.CDCService.GetStats:input_type -> cdc.v1.GetStatsRequest
-	20, // 31: cdc.v1.CDCService.ListMessages:input_type -> cdc.v1.ListMessagesRequest
-	23, // 32: cdc.v1.CDCService.GetConsumerInfo:input_type -> cdc.v1.GetConsumerInfoRequest
-	25, // 33: cdc.v1.CDCService.ListTopics:input_type -> cdc.v1.ListTopicsRequest
-	28, // 34: cdc.v1.CDCService.ListPartitions:input_type -> cdc.v1.ListPartitionsRequest
-	16, // 35: cdc.v1.CDCService.HealthCheck:output_type -> cdc.v1.HealthCheckResponse
-	3,  // 36: cdc.v1.CDCService.GetConfig:output_type -> cdc.v1.GetConfigResponse
-	8,  // 37: cdc.v1.CDCService.AddSource:output_type -> cdc.v1.AddSourceResponse
-	10, // 38: cdc.v1.CDCService.RemoveSource:output_type -> cdc.v1.RemoveSourceResponse
-	12, // 39: cdc.v1.CDCService.AddSink:output_type -> cdc.v1.AddSinkResponse
-	14, // 40: cdc.v1.CDCService.RemoveSink:output_type -> cdc.v1.RemoveSinkResponse
-	18, // 41: cdc.v1.CDCService.GetStats:output_type -> cdc.v1.GetStatsResponse
-	21, // 42: cdc.v1.CDCService.ListMessages:output_type -> cdc.v1.ListMessagesResponse
-	24, // 43: cdc.v1.CDCService.GetConsumerInfo:output_type -> cdc.v1.GetConsumerInfoResponse
-	26, // 44: cdc.v1.CDCService.ListTopics:output_type -> cdc.v1.ListTopicsResponse
-	29, // 45: cdc.v1.CDCService.ListPartitions:output_type -> cdc.v1.ListPartitionsResponse
-	35, // [35:46] is the sub-list for method output_type
-	24, // [24:35] is the sub-list for method input_type
-	24, // [24:24] is the sub-list for extension type_name
-	24, // [24:24] is the sub-list for extension extendee
-	0,  // [0:24] is the sub-list for field type_name
+	35, // 4: cdc.v1.SinkConfig.field_mapping:type_name -> cdc.v1.SinkConfig.FieldMappingEntry
+	5,  // 5: cdc.v1.AddSourceRequest.source:type_name -> cdc.v1.SourceConfig
+	6,  // 6: cdc.v1.AddSinkRequest.sink:type_name -> cdc.v1.SinkConfig
+	36, // 7: cdc.v1.GetStatsResponse.source_stats:type_name -> cdc.v1.GetStatsResponse.SourceStatsEntry
+	37, // 8: cdc.v1.GetStatsResponse.sink_stats:type_name -> cdc.v1.GetStatsResponse.SinkStatsEntry
+	0,  // 9: cdc.v1.ListMessagesRequest.status:type_name -> cdc.v1.MessageStatus
+	31, // 10: cdc.v1.ListMessagesRequest.pagination:type_name -> cdc.v1.OffsetPaginationRequest
+	22, // 11: cdc.v1.ListMessagesResponse.data:type_name -> cdc.v1.MessageItem
+	33, // 12: cdc.v1.ListMessagesResponse.pagination:type_name -> cdc.v1.OffsetPaginationResponse
+	38, // 13: cdc.v1.MessageItem.headers:type_name -> cdc.v1.MessageItem.HeadersEntry
+	31, // 14: cdc.v1.ListTopicsRequest.pagination:type_name -> cdc.v1.OffsetPaginationRequest
+	27, // 15: cdc.v1.ListTopicsResponse.data:type_name -> cdc.v1.TopicSummary
+	33, // 16: cdc.v1.ListTopicsResponse.pagination:type_name -> cdc.v1.OffsetPaginationResponse
+	31, // 17: cdc.v1.ListPartitionsRequest.pagination:type_name -> cdc.v1.OffsetPaginationRequest
+	30, // 18: cdc.v1.ListPartitionsResponse.data:type_name -> cdc.v1.PartitionSummary
+	33, // 19: cdc.v1.ListPartitionsResponse.pagination:type_name -> cdc.v1.OffsetPaginationResponse
+	32, // 20: cdc.v1.OffsetPaginationRequest.sort:type_name -> cdc.v1.Sort
+	1,  // 21: cdc.v1.Sort.order:type_name -> cdc.v1.SortOrder
+	32, // 22: cdc.v1.OffsetPaginationResponse.sort:type_name -> cdc.v1.Sort
+	19, // 23: cdc.v1.GetStatsResponse.SourceStatsEntry.value:type_name -> cdc.v1.ComponentStats
+	19, // 24: cdc.v1.GetStatsResponse.SinkStatsEntry.value:type_name -> cdc.v1.ComponentStats
+	15, // 25: cdc.v1.CDCService.HealthCheck:input_type -> cdc.v1.HealthCheckRequest
+	2,  // 26: cdc.v1.CDCService.GetConfig:input_type -> cdc.v1.GetConfigRequest
+	7,  // 27: cdc.v1.CDCService.AddSource:input_type -> cdc.v1.AddSourceRequest
+	9,  // 28: cdc.v1.CDCService.RemoveSource:input_type -> cdc.v1.RemoveSourceRequest
+	11, // 29: cdc.v1.CDCService.AddSink:input_type -> cdc.v1.AddSinkRequest
+	13, // 30: cdc.v1.CDCService.RemoveSink:input_type -> cdc.v1.RemoveSinkRequest
+	17, // 31: cdc.v1.CDCService.GetStats:input_type -> cdc.v1.GetStatsRequest
+	20, // 32: cdc.v1.CDCService.ListMessages:input_type -> cdc.v1.ListMessagesRequest
+	23, // 33: cdc.v1.CDCService.GetConsumerInfo:input_type -> cdc.v1.GetConsumerInfoRequest
+	25, // 34: cdc.v1.CDCService.ListTopics:input_type -> cdc.v1.ListTopicsRequest
+	28, // 35: cdc.v1.CDCService.ListPartitions:input_type -> cdc.v1.ListPartitionsRequest
+	16, // 36: cdc.v1.CDCService.HealthCheck:output_type -> cdc.v1.HealthCheckResponse
+	3,  // 37: cdc.v1.CDCService.GetConfig:output_type -> cdc.v1.GetConfigResponse
+	8,  // 38: cdc.v1.CDCService.AddSource:output_type -> cdc.v1.AddSourceResponse
+	10, // 39: cdc.v1.CDCService.RemoveSource:output_type -> cdc.v1.RemoveSourceResponse
+	12, // 40: cdc.v1.CDCService.AddSink:output_type -> cdc.v1.AddSinkResponse
+	14, // 41: cdc.v1.CDCService.RemoveSink:output_type -> cdc.v1.RemoveSinkResponse
+	18, // 42: cdc.v1.CDCService.GetStats:output_type -> cdc.v1.GetStatsResponse
+	21, // 43: cdc.v1.CDCService.ListMessages:output_type -> cdc.v1.ListMessagesResponse
+	24, // 44: cdc.v1.CDCService.GetConsumerInfo:output_type -> cdc.v1.GetConsumerInfoResponse
+	26, // 45: cdc.v1.CDCService.ListTopics:output_type -> cdc.v1.ListTopicsResponse
+	29, // 46: cdc.v1.CDCService.ListPartitions:output_type -> cdc.v1.ListPartitionsResponse
+	36, // [36:47] is the sub-list for method output_type
+	25, // [25:36] is the sub-list for method input_type
+	25, // [25:25] is the sub-list for extension type_name
+	25, // [25:25] is the sub-list for extension extendee
+	0,  // [0:25] is the sub-list for field type_name
 }
 
 func init() { file_cdc_proto_init() }
@@ -2334,7 +2348,7 @@ func file_cdc_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cdc_proto_rawDesc), len(file_cdc_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   36,
+			NumMessages:   37,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -129,6 +129,7 @@ message SinkConfig {
   optional string instance_id = 13; // Unique ID for sink
   optional string name = 14;        // Display name
   optional string topic = 15;       // Routing topic
+  map<string, string> field_mapping = 16;
 }
 
 //  Dynamic Operations
