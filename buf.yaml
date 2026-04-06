@@ -1,10 +1,6 @@
 version: v2
 modules:
   - path: api/proto/v1
-  - path: third_party
-lint:
-  use:
-    - DEFAULT
-breaking:
-  use:
-    - FILE
+    name: buf.build/cdc/v1
+deps:
+  - buf.build/googleapis/googleapis
