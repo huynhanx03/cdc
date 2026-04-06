@@ -51,4 +51,24 @@ var (
 		Help:    "Time spent writing to a sink",
 		Buckets: prometheus.DefBuckets,
 	}, []string{"sink_id", "type"})
+
+	// NATS connection health
+	NATSReconnectTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "cdc_nats_reconnect_total",
+		Help: "Total number of NATS reconnections",
+	})
+
+	// Backpressure monitoring
+	EventChannelUtilization = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "cdc_event_channel_utilization",
+		Help: "Ratio of event channel usage (0.0 to 1.0), high values indicate backpressure",
+	})
+
+	// Batch size distribution
+	BatchSizeHistogram = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "cdc_batch_size",
+		Help:    "Distribution of actual batch sizes being processed",
+		Buckets: []float64{1, 5, 10, 25, 50, 100, 250, 500, 1000},
+	}, []string{"component"}) // component: producer/worker
 )
+

@@ -80,6 +80,12 @@ service CDCService {
       get : "/api/v1/partitions"
     };
   }
+
+  rpc ReprocessDLQ(ReprocessDLQRequest) returns (ReprocessDLQResponse) {
+    option (google.api.http) = {
+      post : "/api/v1/dlq/reprocess"
+    };
+  }
 }
 
 // ... messages ...
@@ -256,3 +262,10 @@ message OffsetPaginationResponse {
   bool has_prev = 5;
   repeated Sort sort = 6;
 }
+
+message ReprocessDLQRequest {}
+
+message ReprocessDLQResponse {
+  int32 count = 1;
+}
+

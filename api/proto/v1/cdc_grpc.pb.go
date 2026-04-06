@@ -30,6 +30,7 @@ const (
 	CDCService_GetConsumerInfo_FullMethodName = "/cdc.v1.CDCService/GetConsumerInfo"
 	CDCService_ListTopics_FullMethodName      = "/cdc.v1.CDCService/ListTopics"
 	CDCService_ListPartitions_FullMethodName  = "/cdc.v1.CDCService/ListPartitions"
+	CDCService_ReprocessDLQ_FullMethodName    = "/cdc.v1.CDCService/ReprocessDLQ"
 )
 
 // CDCServiceClient is the client API for CDCService service.
@@ -52,6 +53,7 @@ type CDCServiceClient interface {
 	GetConsumerInfo(ctx context.Context, in *GetConsumerInfoRequest, opts ...grpc.CallOption) (*GetConsumerInfoResponse, error)
 	ListTopics(ctx context.Context, in *ListTopicsRequest, opts ...grpc.CallOption) (*ListTopicsResponse, error)
 	ListPartitions(ctx context.Context, in *ListPartitionsRequest, opts ...grpc.CallOption) (*ListPartitionsResponse, error)
+	ReprocessDLQ(ctx context.Context, in *ReprocessDLQRequest, opts ...grpc.CallOption) (*ReprocessDLQResponse, error)
 }
 
 type cDCServiceClient struct {
@@ -172,6 +174,16 @@ func (c *cDCServiceClient) ListPartitions(ctx context.Context, in *ListPartition
 	return out, nil
 }
 
+func (c *cDCServiceClient) ReprocessDLQ(ctx context.Context, in *ReprocessDLQRequest, opts ...grpc.CallOption) (*ReprocessDLQResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReprocessDLQResponse)
+	err := c.cc.Invoke(ctx, CDCService_ReprocessDLQ_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CDCServiceServer is the server API for CDCService service.
 // All implementations should embed UnimplementedCDCServiceServer
 // for forward compatibility.
@@ -192,6 +204,7 @@ type CDCServiceServer interface {
 	GetConsumerInfo(context.Context, *GetConsumerInfoRequest) (*GetConsumerInfoResponse, error)
 	ListTopics(context.Context, *ListTopicsRequest) (*ListTopicsResponse, error)
 	ListPartitions(context.Context, *ListPartitionsRequest) (*ListPartitionsResponse, error)
+	ReprocessDLQ(context.Context, *ReprocessDLQRequest) (*ReprocessDLQResponse, error)
 }
 
 // UnimplementedCDCServiceServer should be embedded to have
@@ -233,6 +246,9 @@ func (UnimplementedCDCServiceServer) ListTopics(context.Context, *ListTopicsRequ
 }
 func (UnimplementedCDCServiceServer) ListPartitions(context.Context, *ListPartitionsRequest) (*ListPartitionsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListPartitions not implemented")
+}
+func (UnimplementedCDCServiceServer) ReprocessDLQ(context.Context, *ReprocessDLQRequest) (*ReprocessDLQResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReprocessDLQ not implemented")
 }
 func (UnimplementedCDCServiceServer) testEmbeddedByValue() {}
 
@@ -452,6 +468,24 @@ func _CDCService_ListPartitions_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _CDCService_ReprocessDLQ_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReprocessDLQRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CDCServiceServer).ReprocessDLQ(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CDCService_ReprocessDLQ_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CDCServiceServer).ReprocessDLQ(ctx, req.(*ReprocessDLQRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // CDCService_ServiceDesc is the grpc.ServiceDesc for CDCService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -502,6 +536,10 @@ var CDCService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListPartitions",
 			Handler:    _CDCService_ListPartitions_Handler,
+		},
+		{
+			MethodName: "ReprocessDLQ",
+			Handler:    _CDCService_ReprocessDLQ_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

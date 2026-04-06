@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -17,14 +18,14 @@ import (
 	"github.com/foden/cdc/pkg/registry"
 	"github.com/foden/cdc/pkg/server"
 
+	// Drivers registration
+	_ "github.com/foden/cdc/pkg/sink/elasticsearch"
+	_ "github.com/foden/cdc/pkg/sink/postgres"
+	_ "github.com/foden/cdc/pkg/sink/stdout"
+	_ "github.com/foden/cdc/pkg/sink/webhook"
 	_ "github.com/foden/cdc/pkg/source/mysql"
 	_ "github.com/foden/cdc/pkg/source/postgres"
 	_ "github.com/foden/cdc/pkg/source/rest"
-
-	_ "github.com/foden/cdc/pkg/sink/elasticsearch"
-	_ "github.com/foden/cdc/pkg/sink/stdout"
-	_ "github.com/foden/cdc/pkg/sink/postgres"
-	_ "github.com/foden/cdc/pkg/sink/webhook"
 )
 
 func main() {
@@ -32,115 +33,129 @@ func main() {
 	flag.StringVar(&configPath, "config", "config.yaml", "Path to config file")
 	flag.Parse()
 
+	// 1. Load static config from file
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
-		slog.Error("failed to load config", "err", err)
+		slog.Error("failed to load initial config", "err", err)
 		os.Exit(1)
 	}
 	logger.Init(cfg.LogMode)
 	slog.Info("cdclight starting", "name", cfg.Name)
 
-	// Initialize NATS client early to restore configuration
-	natsClient, err := nats.NewClient(cfg.NATS.URL, cfg.NATS.StreamName)
+	// 2. Initialize NATS early
+	natsClient, err := nats.NewClient(&cfg.NATS)
 	if err != nil {
 		slog.Error("failed to create NATS client", "err", err)
 		os.Exit(1)
 	}
 	defer natsClient.Close()
 
-	// Restore configuration from NATS KV if it exists
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// 3. Restore Config from NATS KV (Override static config if exists)
+	if err := restoreConfig(natsClient, cfg); err != nil {
+		slog.Warn("config restoration skipped, using local file", "err", err)
+	}
+
+	// 4. Create Sources & Sinks from the final config
+	sources, sinks, err := buildRegistry(cfg)
+	if err != nil {
+		slog.Error("failed to initialize registry", "err", err)
+		os.Exit(1)
+	}
+
+	// 5. Initialize Streams
+	setupNatsInfrastructure(natsClient)
+
+	// 6. Execution & Graceful Shutdown
+	run(cfg, natsClient, sources, sinks)
+}
+
+// restoreConfig fetches persisted configuration and RE-COMPILES CEL programs.
+func restoreConfig(client *nats.Client, cfg *config.Config) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	var persistedCfg config.Config
-	found, err := natsClient.GetConfig(ctx, &persistedCfg)
-	if err != nil {
-		slog.Warn("failed to restore configuration from NATS KV, using static config", "err", err)
-	} else if found {
-		slog.Info("restored configuration from NATS KV", "sources", len(persistedCfg.Sources), "sinks", len(persistedCfg.Sinks))
-		// Use persisted config for sources and sinks
-		cfg.Sources = persistedCfg.Sources
-		cfg.Sinks = persistedCfg.Sinks
-		// We could also override pipeline settings if stored
+	found, err := client.GetConfig(ctx, &persistedCfg)
+	if err != nil || !found {
+		return err
 	}
 
-	// Create Sources via registry
-	var sourceList []interfaces.Source
+	slog.Info("restoring config from NATS KV",
+		"sources",
+		len(persistedCfg.Sources),
+		"sinks",
+		len(persistedCfg.Sinks))
+	cfg.Sources = persistedCfg.Sources
+	cfg.Sinks = persistedCfg.Sinks
+
+	// RE-WARM CEL Programs: Because 'programs' field is private and not stored in KV.
+	for i := range cfg.Sinks {
+		if err := cfg.Sinks[i].CompileTransformations(); err != nil {
+			return fmt.Errorf("failed to re-compile sink %s: %w", cfg.Sinks[i].InstanceID, err)
+		}
+	}
+	return nil
+}
+
+// buildRegistry creates runtime objects from config data.
+func buildRegistry(cfg *config.Config) ([]interfaces.Source, []interfaces.Sink, error) {
+	var sources []interfaces.Source
 	for i := range cfg.Sources {
 		src, err := registry.CreateSource(&cfg.Sources[i])
 		if err != nil {
-			slog.Error("failed to create source", "type", cfg.Sources[i].Type, "err", err)
-			os.Exit(1)
+			return nil, nil, fmt.Errorf("source %s error: %w", cfg.Sources[i].InstanceID, err)
 		}
-		sourceList = append(sourceList, src)
+		sources = append(sources, src)
 	}
 
-	// Create Sinks via registry
-	var sinkList []interfaces.Sink
-	for _, sCfg := range cfg.Sinks {
-		s, err := registry.CreateSink(&sCfg)
+	var sinks []interfaces.Sink
+	for i := range cfg.Sinks {
+		snk, err := registry.CreateSink(&cfg.Sinks[i])
 		if err != nil {
-			slog.Error("failed to create sink", "sink_type", sCfg.Type, "err", err)
+			slog.Warn("skipping faulty sink", "id", cfg.Sinks[i].InstanceID, "err", err)
 			continue
 		}
-		sinkList = append(sinkList, s)
+		sinks = append(sinks, snk)
 	}
+	return sources, sinks, nil
+}
 
-	// Create stream if it doesn't exist with retention
-	retention := time.Duration(cfg.NATS.RetentionDays) * 24 * time.Hour
-	// Use a more generic subject pattern for the stream to capture all CDC events
-	if err := natsClient.CreateStream(ctx, []string{"cdc.>"}, retention); err != nil {
-		slog.Error("failed to create NATS stream", "err", err)
-		os.Exit(1)
-	}
+// setupNatsInfrastructure sets up the NATS environment.
+func setupNatsInfrastructure(client *nats.Client) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	// Start CDC pipeline engine
-	engine := pipeline.NewEngine(
-		cfg.Pipeline.ChannelBufferSize,
-		cfg.Pipeline.WorkerCount,
-		sourceList,
-		sinkList,
-		natsClient,
-	)
+	_ = client.CreateStream(ctx, []string{"cdc.>"})
+	_ = client.CreateDLQStream(ctx)
+}
 
-	// Start gRPC + REST server
+// run starts the application and handles graceful shutdown.
+func run(cfg *config.Config, natsClient *nats.Client, sources []interfaces.Source, sinks []interfaces.Sink) {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	engine := pipeline.NewEngine(cfg, sources, sinks, natsClient)
 	appServer := server.NewAppServer(
-		server.ServerConfig{
-			GRPCPort: cfg.Server.GRPCPort,
-			HTTPPort: cfg.Server.HTTPPort,
-		},
-		cfg,
-		natsClient,
-		engine,
+		server.ServerConfig{GRPCPort: cfg.Server.GRPCPort, HTTPPort: cfg.Server.HTTPPort},
+		cfg, natsClient, engine,
 	)
 
-	if err := appServer.Start(); err != nil {
-		slog.Error("failed to start gRPC/REST server", "err", err)
-		os.Exit(1)
-	}
+	_ = appServer.Start()
 
 	errCh := make(chan error, 1)
 	go func() {
 		if err := engine.Start(); err != nil {
-			slog.Error("engine error", "err", err)
 			errCh <- err
 		}
 	}()
 
-	// Graceful shutdown
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
 	select {
-	case <-sigCh:
-		slog.Info("shutdown signal received")
+	case <-ctx.Done():
+		slog.Info("shutting down...")
 	case err := <-errCh:
-		slog.Error("shutting down due to engine error", "err", err)
+		slog.Error("engine failure", "err", err)
 	}
 
 	engine.Stop()
 	appServer.Stop()
-	// natsClient.Close() is called via defer
-
-	slog.Info("cdclight shutdown completed")
 }

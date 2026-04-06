@@ -111,6 +111,17 @@ func (s *GRPCService) ListPartitions(ctx context.Context, req *cdcpb.ListPartiti
 	}, nil
 }
 
+func (s *GRPCService) ReprocessDLQ(ctx context.Context, _ *cdcpb.ReprocessDLQRequest) (*cdcpb.ReprocessDLQResponse, error) {
+	count, err := s.engine.ReprocessDLQ(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &cdcpb.ReprocessDLQResponse{
+		Count: int32(count),
+	}, nil
+}
+
+
 func (s *GRPCService) getPaginationParams(req *cdcpb.OffsetPaginationRequest) (uint32, uint32, []*cdcpb.Sort) {
 	limit := uint32(20)
 	page := uint32(1)

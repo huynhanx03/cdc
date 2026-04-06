@@ -38,16 +38,21 @@ func New(cfg *config.SinkConfig) *WebhookSink {
 
 // Write sends a single CDC event to the webhook URL.
 func (s *WebhookSink) Write(event *models.Event) error {
+	return s.WriteBatch([]*models.Event{event})
+}
+
+// WriteBatch sends multiple events to the webhook URL.
+func (s *WebhookSink) WriteBatch(events []*models.Event) error {
 	if len(s.cfg.URL) == 0 {
 		return fmt.Errorf("no webhook URL configured")
 	}
 
 	url := s.cfg.URL[0]
 	
-	// Prepare payload
-	payload, err := json.Marshal(event)
+	// Prepare payload (sending batch as JSON array)
+	payload, err := json.Marshal(events)
 	if err != nil {
-		return fmt.Errorf("marshal event failed: %w", err)
+		return fmt.Errorf("marshal events failed: %w", err)
 	}
 
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(payload))

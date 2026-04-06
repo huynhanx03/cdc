@@ -78,33 +78,40 @@ func New(cfg *config.SinkConfig) (*ElasticSink, error) {
 
 // Write buffers a single CDC event. Auto-flushes when batch_size is reached.
 func (s *ElasticSink) Write(event *models.Event) error {
-	docMap := event.After
-	if event.Op == constant.DeleteAction.String() {
-		docMap = event.Before
-	}
-	if len(docMap) == 0 {
-		return nil
-	}
+	return s.WriteBatch([]*models.Event{event})
+}
 
-	index := s.indexName(event.InstanceID, event.Table)
-	docID := extractID(docMap)
-
+// WriteBatch buffers multiple CDC events. Auto-flushes when batch_size is reached.
+func (s *ElasticSink) WriteBatch(events []*models.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if event.Op == constant.DeleteAction.String() {
-		s.writeDeleteAction(index, docID)
-	} else {
-		mappedDoc, err := s.cfg.ApplyFieldMapping(docMap)
-		if err != nil {
-			slog.Warn("field mapping application failed", "err", err, "index", index, "id", docID)
-			s.writeIndexAction(index, docID, docMap) // write original
-		} else {
-			s.writeIndexAction(index, docID, mappedDoc)
+	for _, event := range events {
+		docMap := event.After
+		if event.Op == constant.DeleteAction.String() {
+			docMap = event.Before
 		}
+		if len(docMap) == 0 {
+			continue
+		}
+
+		index := s.indexName(event.InstanceID, event.Table)
+		docID := extractID(docMap)
+
+		if event.Op == constant.DeleteAction.String() {
+			s.writeDeleteAction(index, docID)
+		} else {
+			mappedDoc, err := s.cfg.ApplyFieldMapping(docMap)
+			if err != nil {
+				slog.Warn("field mapping application failed", "err", err, "index", index, "id", docID)
+				s.writeIndexAction(index, docID, docMap) // write original
+			} else {
+				s.writeIndexAction(index, docID, mappedDoc)
+			}
+		}
+		s.pending++
 	}
 
-	s.pending++
 	if s.pending >= int(s.cfg.BatchSize) {
 		return s.flushLocked()
 	}

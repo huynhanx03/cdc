@@ -23,6 +23,8 @@ type Sink interface {
 	// Write writes an event to the sink.
 	// For bulk operations, the sink itself should implement batching/buffering logic internally.
 	Write(event *models.Event) error
+	// WriteBatch writes a batch of events to the sink.
+	WriteBatch(events []*models.Event) error
 	// Flush forces a sync of the current buffer
 	Flush() error
 	// Close gracefully flushes remaining events and stops the sink
@@ -47,4 +49,5 @@ type PipelineEngine interface {
 	GetConsumerInfo(ctx context.Context, consumerName string) (uint64, uint64, error)
 	ListTopics(ctx context.Context, limit int, page int) ([]string, uint64, error)
 	ListPartitions(ctx context.Context, topic string, limit int, page int) ([]string, uint64, error)
+	ReprocessDLQ(ctx context.Context) (int, error)
 }

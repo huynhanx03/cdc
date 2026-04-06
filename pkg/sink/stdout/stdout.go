@@ -34,17 +34,24 @@ func New(cfg *config.SinkConfig) *StdoutSink {
 
 // Write prints the event as JSON to stdout.
 func (s *StdoutSink) Write(event *models.Event) error {
-	b, err := json.MarshalIndent(event, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to encode event: %w", err)
+	return s.WriteBatch([]*models.Event{event})
+}
+
+// WriteBatch prints multiple events to stdout.
+func (s *StdoutSink) WriteBatch(events []*models.Event) error {
+	for _, event := range events {
+		b, err := json.MarshalIndent(event, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to encode event: %w", err)
+		}
+		slog.Info("event captured",
+			"instance", event.InstanceID,
+			"op", event.Op,
+			"db", event.Database,
+			"table", event.Table,
+			"payload", string(b),
+		)
 	}
-	slog.Info("event captured",
-		"instance", event.InstanceID,
-		"op", event.Op,
-		"db", event.Database,
-		"table", event.Table,
-		"payload", string(b),
-	)
 	return nil
 }
 

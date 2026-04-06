@@ -5,41 +5,54 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/foden/cdc/api/proto/v1"
+	cdcpb "github.com/foden/cdc/api/proto/v1"
+	"github.com/foden/cdc/pkg/config"
 	"github.com/foden/cdc/pkg/constant"
 	"github.com/foden/cdc/pkg/interfaces"
+	"github.com/foden/cdc/pkg/metrics"
 	"github.com/foden/cdc/pkg/models"
 	"github.com/foden/cdc/pkg/nats"
-	"github.com/foden/cdc/pkg/metrics"
+	"github.com/foden/cdc/pkg/utils"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
 const (
 	_nameErr        = "err"
 	_nameBufferSize = "buffer_size"
-	// How many events the worker tries to pull from the WAL in one go
-	_batchSize = 100
-	// Max time a worker waits before flushing a partial batch
-	_flushInterval = 1 * time.Second
 )
+
+// EventFilter returns false to drop an event before publishing.
+type EventFilter func(event *models.Event) bool
+
+// EventTransformer modifies an event before publishing.
+type EventTransformer func(event *models.Event) *models.Event
 
 // Engine is the core CDC pipeline that connects a Source to multiple Sinks
 // using a WAL-backed queue for reliability.
 type Engine struct {
-	mu             sync.RWMutex
-	sources        []interfaces.Source
-	sinks          []interfaces.Sink
-	natsClient     *nats.Client
-	sourceAckChs   map[string]chan uint64
-	eventCh        chan *models.Event
+	mu           sync.RWMutex
+	sources      []interfaces.Source
+	sinks        []interfaces.Sink
+	natsClient   *nats.Client
+	sourceAckChs map[string]chan uint64
+	eventCh      chan *models.Event
 
 	stopCh         chan struct{}
+	stopped        atomic.Bool
+	batchSize      int
+	flushInterval  time.Duration
 	partitionCount int
 	wg             sync.WaitGroup
+
+	// Pipeline hooks
+	filters      []EventFilter
+	transformers []EventTransformer
 
 	// Metrics
 	metricsMu   sync.RWMutex
@@ -50,20 +63,32 @@ type Engine struct {
 	sinkCancels map[string]context.CancelFunc
 }
 
-// NewEngine creates a pipeline engine with configurable buffer size and partition count.
-func NewEngine(bufferSize, partitionCount int, sources []interfaces.Source, sinks []interfaces.Sink, natsClient *nats.Client) *Engine {
+// NewEngine creates a pipeline engine with configurable settings.
+func NewEngine(cfg *config.Config, sources []interfaces.Source, sinks []interfaces.Sink, natsClient *nats.Client) *Engine {
 	return &Engine{
 		sources:        sources,
 		sinks:          sinks,
 		natsClient:     natsClient,
 		sourceAckChs:   make(map[string]chan uint64),
-		eventCh:        make(chan *models.Event, bufferSize),
+		eventCh:        make(chan *models.Event, cfg.Pipeline.ChannelBufferSize),
 		stopCh:         make(chan struct{}),
-		partitionCount: partitionCount,
+		partitionCount: cfg.Pipeline.WorkerCount,
+		batchSize:      cfg.Pipeline.BatchSize,
+		flushInterval:  time.Duration(cfg.Pipeline.FlushIntervalMs) * time.Millisecond,
 		sourceStats:    make(map[string]*models.ComponentStats),
 		sinkStats:      make(map[string]*models.ComponentStats),
 		sinkCancels:    make(map[string]context.CancelFunc),
 	}
+}
+
+// AddFilter adds a filter function that drops events returning false.
+func (e *Engine) AddFilter(f EventFilter) {
+	e.filters = append(e.filters, f)
+}
+
+// AddTransformer adds a transformation function applied before publishing.
+func (e *Engine) AddTransformer(t EventTransformer) {
+	e.transformers = append(e.transformers, t)
 }
 
 // Start launches the producer and worker pool, then starts all sources.
@@ -87,49 +112,167 @@ func (e *Engine) Start() error {
 
 	// 3. Start all sources
 	for _, src := range e.sources {
-		instanceID := src.InstanceID()
-		ackCh := make(chan uint64, 1000)
-		e.sourceAckChs[instanceID] = ackCh
-
-		// Fetch initial offset from NATS KV for resumption
-		offset, err := e.natsClient.GetOffset(context.Background(), instanceID)
-		if err != nil {
-			slog.Warn("failed to fetch initial offset", "instance_id", instanceID, _nameErr, err)
-		}
-
-		if err := src.Start(e.eventCh, ackCh, offset); err != nil {
-			return fmt.Errorf("failed to start source %s: %w", instanceID, err)
+		if err := e.startSourceInternal(context.Background(), src); err != nil {
+			return err
 		}
 	}
 
 	return nil
 }
 
-// producer consumes from eventCh (from Source) and pushes to hierarchical subject
+func (e *Engine) startSourceInternal(ctx context.Context, src interfaces.Source) error {
+	instanceID := src.InstanceID()
+	ackCh := make(chan uint64, 1000)
+	e.sourceAckChs[instanceID] = ackCh
+
+	offset, err := e.natsClient.GetOffset(ctx, instanceID)
+	if err != nil {
+		slog.Warn("failed to fetch initial offset", "instance_id", instanceID, _nameErr, err)
+	}
+	initialOffset := utils.DerefString(offset, "")
+
+	if err := src.Start(e.eventCh, ackCh, initialOffset); err != nil {
+		return fmt.Errorf("failed to start source %s: %w", instanceID, err)
+	}
+	return nil
+}
+
+// producer consumes from eventCh (from Source) and pushes to hierarchical subject in batches.
+// Applies filtering and transformation hooks before publishing.
 func (e *Engine) producer() {
 	defer e.wg.Done()
 	slog.Debug("pipeline producer started")
+	// Pre-allocate batch
+	batch := make([]*models.Event, 0, e.batchSize)
+	flushTicker := time.NewTicker(e.flushInterval)
+	// Backpressure monitoring ticker
+	backpressureTicker := time.NewTicker(5 * time.Second)
 
-	for ev := range e.eventCh {
+	defer func() {
+		flushTicker.Stop()
+		backpressureTicker.Stop()
+	}()
+
+	subjectFunc := func(ev *models.Event) string {
 		topic := ev.Topic
 		if topic == "" {
-			topic = "cdc" // fallback
+			topic = "cdc"
 		}
-		
-		subject := fmt.Sprintf("%s.%s.%s.%s",
+		return fmt.Sprintf("%s.%s.%s.%s",
 			topic,
 			ev.InstanceID,
 			strings.ReplaceAll(ev.Database, ".", "_"),
 			strings.ReplaceAll(ev.Table, ".", "_"))
+	}
 
-		if err := e.natsClient.Publish(context.Background(), subject, ev); err != nil {
-			slog.Error("failed to publish to NATS", _nameErr, err)
+	for {
+		select {
+		case ev, ok := <-e.eventCh:
+			if !ok {
+				// Final flush before exiting
+				if len(batch) > 0 {
+					e.publishBatch(subjectFunc, batch)
+				}
+				slog.Debug("pipeline producer exited")
+				return
+			}
+
+			// Pipeline logic: Filter & Transform
+			processedEv := e.applyMiddleware(ev)
+			if processedEv == nil {
+				continue
+			}
+			batch = append(batch, processedEv)
+			if len(batch) >= e.batchSize {
+				e.publishBatchWithRetry(subjectFunc, batch)
+				batch = batch[:0] // Reset slice nhưng giữ nguyên capacity
+			}
+
+			// Apply filters — skip events that don't pass
+			skip := false
+			for _, f := range e.filters {
+				if !f(ev) {
+					skip = true
+					break
+				}
+			}
+			if skip {
+				continue
+			}
+
+			// Apply transformers
+			for _, t := range e.transformers {
+				ev = t(ev)
+			}
+
+			batch = append(batch, ev)
+			if len(batch) >= e.batchSize {
+				e.publishBatch(subjectFunc, batch)
+				batch = batch[:0]
+			}
+		case <-flushTicker.C:
+			if len(batch) > 0 {
+				e.publishBatch(subjectFunc, batch)
+				batch = batch[:0]
+			}
+		case <-backpressureTicker.C:
+			// Report channel utilization for backpressure monitoring
+			if cap(e.eventCh) > 0 {
+				metrics.EventChannelUtilization.Set(float64(len(e.eventCh)) / float64(cap(e.eventCh)))
+			}
+		}
+	}
+}
+
+func (e *Engine) applyMiddleware(ev *models.Event) *models.Event {
+	for _, f := range e.filters {
+		if !f(ev) {
+			return nil
+		}
+	}
+	for _, t := range e.transformers {
+		ev = t(ev)
+		if ev == nil {
+			return nil
+		}
+	}
+	return ev
+}
+
+func (e *Engine) publishBatchWithRetry(subjectFunc func(*models.Event) string, batch []*models.Event) {
+	metrics.BatchSizeHistogram.WithLabelValues("producer").Observe(float64(len(batch)))
+
+	const maxRetries = 3
+	var err error
+	for i := 0; i < maxRetries; i++ {
+		err = e.natsClient.PublishBatch(context.Background(), subjectFunc, batch)
+		if err == nil {
+			for _, ev := range batch {
+				e.updateSourceStats(ev.InstanceID, true, "")
+			}
+			return
+		}
+		time.Sleep(time.Duration(i+1) * 200 * time.Millisecond) // Exponential backoff nhẹ
+	}
+
+	slog.Error("failed to publish batch after retries", _nameErr, err)
+	for _, ev := range batch {
+		e.updateSourceStats(ev.InstanceID, false, err.Error())
+	}
+}
+
+func (e *Engine) publishBatch(subjectFunc func(*models.Event) string, batch []*models.Event) {
+	metrics.BatchSizeHistogram.WithLabelValues("producer").Observe(float64(len(batch)))
+	if err := e.natsClient.PublishBatch(context.Background(), subjectFunc, batch); err != nil {
+		slog.Error("failed to publish batch to NATS", _nameErr, err)
+		for _, ev := range batch {
 			e.updateSourceStats(ev.InstanceID, false, err.Error())
-		} else {
+		}
+	} else {
+		for _, ev := range batch {
 			e.updateSourceStats(ev.InstanceID, true, "")
 		}
 	}
-	slog.Debug("pipeline producer exited")
 }
 
 // startSinkWorkersUnlocked starts consumer workers for a specific sink.
@@ -144,7 +287,8 @@ func (e *Engine) startSinkWorkersUnlocked(sink interfaces.Sink) {
 	}
 }
 
-// worker consumes events from filtered subjects and sends them to the given sink.
+// worker consumes events from NATS using Fetch with timeout to avoid the
+// iter.Next()-in-default deadlock. This allows time-based flushing to work correctly.
 func (e *Engine) worker(ctx context.Context, sink interfaces.Sink, partID int) {
 	defer e.wg.Done()
 	slog.Debug("pipeline worker started", "worker_id", partID, "sink", sink.InstanceID())
@@ -152,187 +296,141 @@ func (e *Engine) worker(ctx context.Context, sink interfaces.Sink, partID int) {
 	// Use a shared consumer group name unique to this sink to allow multiple sink workers
 	// to share load, while different sinks consume independently.
 	consumerName := fmt.Sprintf("pipeline-worker-%s", sink.InstanceID())
-	topicPattern := []string{sink.Topic()}
-
-	consumer, err := e.natsClient.CreateOrUpdateConsumer(ctx, consumerName, topicPattern)
+	consumer, err := e.natsClient.CreateOrUpdateConsumer(ctx, consumerName, []string{sink.Topic()})
 	if err != nil {
 		slog.Error("failed to create NATS consumer", "worker_id", partID, "sink", sink.InstanceID(), _nameErr, err)
 		return
 	}
-
-	iter, err := consumer.Messages()
-	if err != nil {
-		slog.Error("failed to get consumer messages", "worker_id", partID, "sink", sink.InstanceID(), _nameErr, err)
-		return
-	}
-	defer iter.Stop()
-
-	// Wait for global stop or context cancellation
-	go func() {
-		select {
-		case <-e.stopCh:
-		case <-ctx.Done():
-		}
-		iter.Stop()
-	}()
-
-	var pendingMsgs []jetstream.Msg
-	var pendingLSNs []string
-	flushTicker := time.NewTicker(_flushInterval)
-	defer flushTicker.Stop()
+	// Pre-allocate memory
+	pendingMsgs := make([]jetstream.Msg, 0, e.batchSize)
+	pendingEvents := make([]*models.Event, 0, e.batchSize)
 
 	for {
-		var msg jetstream.Msg
-		var err error
-
+		// Check for shutdown
 		select {
 		case <-ctx.Done():
+			if len(pendingMsgs) > 0 {
+				e.flushAndAck(sink, pendingMsgs, pendingEvents, partID)
+			}
 			slog.Debug("pipeline worker exiting", "worker_id", partID, "sink", sink.InstanceID())
 			return
 		case <-e.stopCh:
-			return
-		case <-flushTicker.C:
-			// Time-based flush for partial batches
 			if len(pendingMsgs) > 0 {
-				e.flushAndAck(sink, pendingMsgs, pendingLSNs, partID)
-				pendingMsgs = nil
-				pendingLSNs = nil
+				e.flushAndAck(sink, pendingMsgs, pendingEvents, partID)
 			}
-			continue
+			return
 		default:
-			msg, err = iter.Next()
-			if err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				slog.Error("failed to get next message", "worker_id", partID, "sink", sink.InstanceID(), _nameErr, err)
-				time.Sleep(1 * time.Second)
+		}
+
+		// Fetch a batch of messages with a timeout.
+		// This is the fix for the iter.Next()-in-default deadlock:
+		// Fetch returns after fetchTimeout even if no messages are available,
+		// giving us a natural point to flush partial batches.
+		fetchSize := e.batchSize - len(pendingMsgs)
+		if fetchSize <= 0 {
+			fetchSize = e.batchSize
+		}
+
+		msgBatch, err := consumer.Fetch(fetchSize, jetstream.FetchMaxWait(e.flushInterval))
+		if err != nil && ctx.Err() == nil {
+			slog.Error("failed to fetch messages", "worker_id", partID, "sink", sink.InstanceID(), _nameErr, err)
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+
+		for msg := range msgBatch.Messages() {
+			var ev models.Event
+			if err := json.Unmarshal(msg.Data(), &ev); err != nil {
+				slog.Error("failed to unmarshal NATS message", "worker_id", partID, "sink", sink.InstanceID(), _nameErr, err)
+				msg.Term() // Don't retry unmarshalable junk
 				continue
 			}
-		}
 
-		var ev models.Event
-		if err := json.Unmarshal(msg.Data(), &ev); err != nil {
-			slog.Error("failed to unmarshal NATS message", "worker_id", partID, "sink", sink.InstanceID(), _nameErr, err)
-			msg.Term() // Don't retry unmarshalable junk
-			continue
-		}
-
-		// Process event on this specific sink
-		start := time.Now()
-		if err := sink.Write(&ev); err != nil {
-			slog.Error("sink write error", "worker_id", partID, "instance_id", ev.InstanceID, "table", ev.Table, _nameErr, err)
-			e.updateSinkStats(sink.InstanceID(), false, err.Error())
-			
-			// If max retries reached, move to DLQ instead of infinite retry loop
-			if meta, _ := msg.Metadata(); meta != nil && int32(meta.NumDelivered) >= sink.MaxRetries() {
-				slog.Warn("max retries reached, moving to DLQ", "instance_id", ev.InstanceID, "table", ev.Table, "num_delivered", meta.NumDelivered)
-				if errDLQ := e.natsClient.MoveToDLQ(ctx, msg, fmt.Sprintf("sink_error: %s", err.Error())); errDLQ != nil {
-					slog.Error("failed to move to DLQ", _nameErr, errDLQ)
-					msg.Nak() // Fallback to retry if DLQ failed
-				} else {
-					metrics.DLQEventsTotal.WithLabelValues(ev.InstanceID, sink.InstanceID(), "max_retries").Inc()
-				}
-				continue // MoveToDLQ already ACKs the message
-			}
-
-			// Immediately NAK this message and the current batch to trigger retry
-			msg.Nak()
-			for _, m := range pendingMsgs {
-				m.Nak()
-			}
-			pendingMsgs = nil
-			pendingLSNs = nil
-		} else {
-			duration := time.Since(start)
-			metrics.SinkWriteDuration.WithLabelValues(sink.InstanceID(), sink.Type()).Observe(duration.Seconds())
-			metrics.WorkerProcessDuration.WithLabelValues(sink.InstanceID()).Observe(duration.Seconds())
-
-			e.updateSinkStats(sink.InstanceID(), true, "")
-
-			// Collect metadata for background acknowledgement and offset persistence
-			headers := msg.Headers()
-			instID := headers.Get(constant.HeaderInstanceID)
-			lsnVal := headers.Get(constant.HeaderLSN)
-
-			if instID != "" && lsnVal != "" {
-				pendingLSNs = append(pendingLSNs, fmt.Sprintf("%s:%s", instID, lsnVal))
-			}
+			// Buffer event and message
 			pendingMsgs = append(pendingMsgs, msg)
+			pendingEvents = append(pendingEvents, &ev)
+		}
 
-			if len(pendingMsgs) >= _batchSize {
-				e.flushAndAck(sink, pendingMsgs, pendingLSNs, partID)
-				pendingMsgs = nil
-				pendingLSNs = nil
+		// Flush when batch is full or when Fetch returned (timeout = partial batch flush)
+		if len(pendingMsgs) > 0 && (len(pendingMsgs) >= e.batchSize || msgBatch.Error() != nil) {
+			metrics.BatchSizeHistogram.WithLabelValues("worker").Observe(float64(len(pendingMsgs)))
+			e.flushAndAck(sink, pendingMsgs, pendingEvents, partID)
+
+			pendingMsgs = pendingMsgs[:0]
+			pendingEvents = pendingEvents[:0]
+		}
+	}
+}
+
+func (e *Engine) flushAndAck(sink interfaces.Sink, msgs []jetstream.Msg, events []*models.Event, workerID int) {
+	start := time.Now()
+	// Write batch to sink
+	if err := sink.WriteBatch(events); err != nil {
+		e.handleSinkError(sink, msgs, err, workerID)
+		return
+	}
+	if err := sink.Flush(); err != nil {
+		for _, m := range msgs {
+			m.Nak()
+		}
+		return
+	}
+
+	// Update Metrics
+	duration := time.Since(start)
+	metrics.SinkWriteDuration.WithLabelValues(sink.InstanceID(), sink.Type()).Observe(duration.Seconds() / float64(len(events)))
+	e.updateSinkStats(sink.InstanceID(), true, "")
+
+	// Handle Offsets and ACKs
+	latestOffsets := make(map[string]string)
+	highestLSNs := make(map[string]uint64)
+
+	for _, m := range msgs {
+		h := m.Headers()
+		instID := h.Get(constant.HeaderInstanceID)
+		if instID != "" {
+			if off := h.Get(constant.HeaderOffset); off != "" {
+				latestOffsets[instID] = off
+			}
+			if lsnVal := h.Get(constant.HeaderLSN); lsnVal != "" {
+				if lsn, err := strconv.ParseUint(lsnVal, 10, 64); err == nil {
+					if lsn > highestLSNs[instID] {
+						highestLSNs[instID] = lsn
+					}
+				}
+			}
+		}
+		m.Ack()
+	}
+
+	// Save Offset to NATS KV
+	for instID, offset := range latestOffsets {
+		e.natsClient.SaveOffset(context.Background(), instID, offset)
+	}
+
+	// Response to Source channel
+	for instID, lsn := range highestLSNs {
+		e.mu.RLock()
+		ch, ok := e.sourceAckChs[instID]
+		e.mu.RUnlock()
+		if ok {
+			select {
+			case ch <- lsn:
+			default: // avoid blocking worker if ackCh full
 			}
 		}
 	}
 }
 
-// flushAndAck forces a flush on a specific sink and ACKs the messages if successful.
-func (e *Engine) flushAndAck(sink interfaces.Sink, msgs []jetstream.Msg, lsnKeys []string, workerID int) {
-	var hasError bool
-	if err := sink.Flush(); err != nil {
-		slog.Error("sink flush error", "worker_id", workerID, "sink", sink.InstanceID(), _nameErr, err)
-		hasError = true
-	}
+// handleSinkError handles errors that occur during sink operations.
+func (e *Engine) handleSinkError(sink interfaces.Sink, msgs []jetstream.Msg, err error, workerID int) {
+	slog.Error("sink write batch error", "worker_id", workerID, "sink", sink.InstanceID(), _nameErr, err)
+	e.updateSinkStats(sink.InstanceID(), false, err.Error())
 
-	if !hasError {
-		// All sinks successfully persisted the batch
-		// Track the latest offset for each instance in this batch
-		latestOffsets := make(map[string]string)
-		highestLSNs := make(map[string]uint64)
-
-		for _, m := range msgs {
-			h := m.Headers()
-			instID := h.Get(constant.HeaderInstanceID)
-			if instID == "" {
-				m.Ack()
-				continue
-			}
-
-			// Capture the latest generic offset (last one in ordered batch is latest)
-			if off := h.Get(constant.HeaderOffset); off != "" {
-				latestOffsets[instID] = off
-			}
-
-			// Capture the highest LSN for Postgres WAL management
-			if lsnVal := h.Get(constant.HeaderLSN); lsnVal != "" {
-				var lsn uint64
-				fmt.Sscanf(lsnVal, "%d", &lsn)
-				if current, ok := highestLSNs[instID]; !ok || lsn > current {
-					highestLSNs[instID] = lsn
-				}
-			}
-
-			m.Ack()
-		}
-
-		// Persist offsets to NATS KV for persistent tracking
-		for instID, offset := range latestOffsets {
-			if err := e.natsClient.SaveOffset(context.Background(), instID, offset); err != nil {
-				slog.Error("failed to save offset in KV", "instance_id", instID, "offset", offset, _nameErr, err)
-			}
-		}
-
-		// Send highest LSN back to each Source for WAL management
-		for instID, lsn := range highestLSNs {
-			e.mu.RLock()
-			ch, ok := e.sourceAckChs[instID]
-			e.mu.RUnlock()
-			if ok {
-				select {
-				case ch <- lsn:
-				default:
-					slog.Warn("source ACK channel full", "instance_id", instID)
-				}
-			}
-		}
-		slog.Debug("batch flushed and acknowledged", "worker_id", workerID, "count", len(msgs))
-	} else {
-		// Flush failed, NAK all messages for retry
-		slog.Warn("flush failed, NAKing batch for retry", "worker_id", workerID, "count", len(msgs))
-		for _, m := range msgs {
+	for _, m := range msgs {
+		if meta, _ := m.Metadata(); meta != nil && int32(meta.NumDelivered) >= sink.MaxRetries() {
+			e.natsClient.MoveToDLQ(context.Background(), m, fmt.Sprintf("sink_error: %s", err.Error()))
+		} else {
 			m.Nak()
 		}
 	}
@@ -344,6 +442,9 @@ func (e *Engine) flushAndAck(sink interfaces.Sink, msgs []jetstream.Msg, lsnKeys
 // 3. Stop Workers
 // 4. Close Sinks
 func (e *Engine) Stop() {
+	if e.stopped.Swap(true) {
+		return // Already stopped
+	}
 	slog.Info("stopping pipeline engine")
 
 	// Lock only to snapshot data and close channels — no blocking I/O under lock.
@@ -356,16 +457,18 @@ func (e *Engine) Stop() {
 		cancelsToCall = append(cancelsToCall, cancel)
 	}
 
-	close(e.eventCh) // Stops producer
-	close(e.stopCh)  // Globally stops workers
+	close(e.stopCh) // Globally stops workers first
 	e.mu.Unlock()
 
-	// Blocking operations outside lock — no deadlock risk.
+	// Stop sources — they may block on pipeline channel, so do this after stopCh
 	for _, src := range sourcesToStop {
 		if err := src.Stop(); err != nil {
 			slog.Error("source stop error", "instance_id", src.InstanceID(), _nameErr, err)
 		}
 	}
+
+	// Now safe to close the event channel
+	close(e.eventCh)
 
 	for _, cancel := range cancelsToCall {
 		cancel()
@@ -385,27 +488,13 @@ func (e *Engine) Stop() {
 func (e *Engine) AddSource(ctx context.Context, src interfaces.Source) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-
-	instanceID := src.InstanceID()
-	if _, ok := e.sourceAckChs[instanceID]; ok {
-		return fmt.Errorf("source %s already exists", instanceID)
+	if _, ok := e.sourceAckChs[src.InstanceID()]; ok {
+		return fmt.Errorf("source %s already exists", src.InstanceID())
 	}
-
-	ackCh := make(chan uint64, 1000)
-	e.sourceAckChs[instanceID] = ackCh
-
-	offset, err := e.natsClient.GetOffset(ctx, instanceID)
-	if err != nil {
-		slog.Warn("failed to fetch initial offset for new source", "instance_id", instanceID, _nameErr, err)
+	if err := e.startSourceInternal(ctx, src); err != nil {
+		return err
 	}
-
-	if err := src.Start(e.eventCh, ackCh, offset); err != nil {
-		delete(e.sourceAckChs, instanceID)
-		return fmt.Errorf("failed to start source %s: %w", instanceID, err)
-	}
-
 	e.sources = append(e.sources, src)
-	slog.Info("dynamically added source", "instance_id", instanceID)
 	return nil
 }
 
@@ -413,77 +502,41 @@ func (e *Engine) AddSource(ctx context.Context, src interfaces.Source) error {
 func (e *Engine) RemoveSource(instanceID string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-
-	var found bool
-	var srcIdx int
 	for i, src := range e.sources {
 		if src.InstanceID() == instanceID {
-			found = true
-			srcIdx = i
-			break
+			src.Stop()
+			e.sources = append(e.sources[:i], e.sources[i+1:]...)
+			delete(e.sourceAckChs, instanceID)
+			return nil
 		}
 	}
-
-	if !found {
-		return fmt.Errorf("source %s not found", instanceID)
-	}
-
-	src := e.sources[srcIdx]
-	if err := src.Stop(); err != nil {
-		slog.Error("failed to stop source", "instance_id", instanceID, _nameErr, err)
-	}
-
-	e.sources = append(e.sources[:srcIdx], e.sources[srcIdx+1:]...)
-	delete(e.sourceAckChs, instanceID)
-
-	slog.Info("dynamically removed source", "instance_id", instanceID)
-	return nil
+	return fmt.Errorf("source %s not found", instanceID)
 }
 
 // AddSink dynamically adds a new sink.
 func (e *Engine) AddSink(sink interfaces.Sink) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.sinkCancels == nil {
-		e.sinkCancels = make(map[string]context.CancelFunc)
-	}
 	e.sinks = append(e.sinks, sink)
 	e.startSinkWorkersUnlocked(sink)
-	slog.Info("dynamically added sink", "instance_id", sink.InstanceID(), "type", sink.Type())
 }
 
 // RemoveSink stops and removes a sink by its unique instance ID.
 func (e *Engine) RemoveSink(instanceID string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-
-	var found bool
-	var sinkIdx int
 	for i, s := range e.sinks {
 		if s.InstanceID() == instanceID {
-			sinkIdx = i
-			found = true
-			break
+			if cancel, ok := e.sinkCancels[instanceID]; ok {
+				cancel()
+				delete(e.sinkCancels, instanceID)
+			}
+			s.Close()
+			e.sinks = append(e.sinks[:i], e.sinks[i+1:]...)
+			return nil
 		}
 	}
-
-	if !found {
-		return fmt.Errorf("sink with instance ID %s not found", instanceID)
-	}
-
-	if cancel, ok := e.sinkCancels[instanceID]; ok {
-		cancel()
-		delete(e.sinkCancels, instanceID)
-	}
-
-	s := e.sinks[sinkIdx]
-	if err := s.Close(); err != nil {
-		slog.Error("failed to close sink", "instance_id", instanceID, _nameErr, err)
-	}
-
-	e.sinks = append(e.sinks[:sinkIdx], e.sinks[sinkIdx+1:]...)
-	slog.Info("dynamically removed sink", "instance_id", instanceID)
-	return nil
+	return fmt.Errorf("sink %s not found", instanceID)
 }
 
 // GetStats returns the current success/failure metrics.
@@ -491,44 +544,35 @@ func (e *Engine) GetStats() (map[string]*models.ComponentStats, map[string]*mode
 	e.metricsMu.RLock()
 	defer e.metricsMu.RUnlock()
 
-	// Return copies
-	sources := make(map[string]*models.ComponentStats)
+	srcCopy := make(map[string]*models.ComponentStats)
 	for k, v := range e.sourceStats {
-		sources[k] = &models.ComponentStats{
-			SuccessCount: v.SuccessCount,
-			FailureCount: v.FailureCount,
-			LastError:    v.LastError,
-		}
+		srcCopy[k] = v
 	}
 
-	sinks := make(map[string]*models.ComponentStats)
+	sinkCopy := make(map[string]*models.ComponentStats)
 	for k, v := range e.sinkStats {
-		sinks[k] = &models.ComponentStats{
-			SuccessCount: v.SuccessCount,
-			FailureCount: v.FailureCount,
-			LastError:    v.LastError,
-		}
+		sinkCopy[k] = v
 	}
 
-	return sources, sinks
+	return srcCopy, sinkCopy
 }
 
 // updateSourceStats updates stats for a specific source
 func (e *Engine) updateSourceStats(instanceID string, success bool, errStr string) {
 	e.metricsMu.Lock()
 	defer e.metricsMu.Unlock()
-
-	if _, ok := e.sourceStats[instanceID]; !ok {
-		e.sourceStats[instanceID] = &models.ComponentStats{}
+	s, ok := e.sourceStats[instanceID]
+	if !ok {
+		s = &models.ComponentStats{}
+		e.sourceStats[instanceID] = s
 	}
 	if success {
-		e.sourceStats[instanceID].SuccessCount++
+		s.SuccessCount++
 		metrics.EventsProducedTotal.WithLabelValues(instanceID, "success").Inc()
 	} else {
-		e.sourceStats[instanceID].FailureCount++
-		e.sourceStats[instanceID].LastError = errStr
+		s.FailureCount++
+		s.LastError = errStr
 		metrics.EventsProducedTotal.WithLabelValues(instanceID, "failure").Inc()
-		metrics.SourceErrorsTotal.WithLabelValues(instanceID, errStr).Inc()
 	}
 }
 
@@ -536,20 +580,21 @@ func (e *Engine) updateSourceStats(instanceID string, success bool, errStr strin
 func (e *Engine) updateSinkStats(sinkID string, success bool, errStr string) {
 	e.metricsMu.Lock()
 	defer e.metricsMu.Unlock()
-
-	if _, ok := e.sinkStats[sinkID]; !ok {
-		e.sinkStats[sinkID] = &models.ComponentStats{}
+	s, ok := e.sinkStats[sinkID]
+	if !ok {
+		s = &models.ComponentStats{}
+		e.sinkStats[sinkID] = s
 	}
 	if success {
-		e.sinkStats[sinkID].SuccessCount++
+		s.SuccessCount++
 		metrics.EventsConsumedTotal.WithLabelValues(sinkID, "success").Inc()
 	} else {
-		e.sinkStats[sinkID].FailureCount++
-		e.sinkStats[sinkID].LastError = errStr
+		s.FailureCount++
+		s.LastError = errStr
 		metrics.EventsConsumedTotal.WithLabelValues(sinkID, "failure").Inc()
-		metrics.SinkErrorsTotal.WithLabelValues("", sinkID, errStr).Inc()
 	}
 }
+
 // ListMessages returns messages from NATS with classification and optional filters
 func (e *Engine) ListMessages(ctx context.Context, status cdcpb.MessageStatus, limit int, page int, topic string, partition string) ([]*models.Message, uint64, error) {
 	var natsStatus models.MessageStatus
@@ -593,4 +638,18 @@ func (e *Engine) ListTopics(ctx context.Context, limit int, page int) ([]string,
 
 func (e *Engine) ListPartitions(ctx context.Context, topic string, limit int, page int) ([]string, uint64, error) {
 	return e.natsClient.ListPartitions(ctx, topic, limit, page)
+}
+
+// ReprocessDLQ pulls messages from the DLQ stream and re-injects them into the main pipeline.
+func (e *Engine) ReprocessDLQ(ctx context.Context) (int, error) {
+	return e.natsClient.ReprocessDLQ(ctx, func(ev *models.Event) error {
+		select {
+		case e.eventCh <- ev:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-e.stopCh:
+			return fmt.Errorf("engine stopped")
+		}
+	})
 }

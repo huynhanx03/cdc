@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-mysql-org/go-mysql/canal"
 	"github.com/go-mysql-org/go-mysql/mysql"
@@ -88,35 +89,69 @@ func (s *MySQLSource) Start(pipeline chan<- *models.Event, ackCh <-chan uint64, 
 	// Start ack loop
 	go s.ackLoop(ackCh)
 
-	// Run canal. This is blocking.
+	// Run canal with auto-reconnect
 	go func() {
-		var err error
-		if initialOffset != "" {
-			parts := strings.Split(initialOffset, ":")
-			if len(parts) == 2 {
-				pos, pErr := strconv.ParseUint(parts[1], 10, 32)
-				if pErr == nil {
-					mysqlPos := mysql.Position{Name: parts[0], Pos: uint32(pos)}
-					err = s.canal.RunFrom(mysqlPos)
+		backoff := 1 * time.Second
+		maxBackoff := 32 * time.Second
+
+		for {
+			select {
+			case <-s.stop:
+				return
+			default:
+			}
+
+			var err error
+			if initialOffset != "" {
+				parts := strings.Split(initialOffset, ":")
+				if len(parts) == 2 {
+					pos, pErr := strconv.ParseUint(parts[1], 10, 32)
+					if pErr == nil {
+						mysqlPos := mysql.Position{Name: parts[0], Pos: uint32(pos)}
+						err = s.canal.RunFrom(mysqlPos)
+					} else {
+						err = s.canal.Run()
+					}
 				} else {
 					err = s.canal.Run()
 				}
 			} else {
 				err = s.canal.Run()
 			}
-		} else {
-			err = s.canal.Run()
-		}
 
-		if err != nil {
-			if !strings.Contains(err.Error(), "closed") {
-				slog.Error("mysql canal run failed", "err", err)
+			if err != nil {
+				if strings.Contains(err.Error(), "closed") {
+					return // Graceful shutdown
+				}
+
+				slog.Error("mysql canal run failed, reconnecting",
+					"err", err,
+					"instance", s.cfg.InstanceID,
+					"backoff", backoff)
+
+				select {
+				case <-time.After(backoff):
+				case <-s.stop:
+					return
+				}
+
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+
+				// Update offset from last synced position for resume
+				pos := s.canal.SyncedPosition()
+				initialOffset = fmt.Sprintf("%s:%d", pos.Name, pos.Pos)
+				continue
 			}
+			return
 		}
 	}()
 
 	return nil
 }
+
 
 func (s *MySQLSource) Stop() error {
 	slog.Info("stopping mysql source", "instance", s.cfg.InstanceID)

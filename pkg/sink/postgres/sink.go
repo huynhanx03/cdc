@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/foden/cdc/pkg/config"
@@ -62,53 +63,107 @@ func New(cfg *config.SinkConfig) (*PostgresSink, error) {
 
 // Write applies a single CDC event to the target database.
 func (s *PostgresSink) Write(event *models.Event) error {
-	ctx := context.Background()
+	return s.WriteBatch([]*models.Event{event})
+}
 
-	docMap := event.After
-	if event.Op == constant.DeleteAction.String() {
-		docMap = event.Before
-	}
-	if len(docMap) == 0 {
+// WriteBatch applies a batch of CDC events to the target database within a single transaction.
+func (s *PostgresSink) WriteBatch(events []*models.Event) error {
+	if len(events) == 0 {
 		return nil
 	}
 
-	// Apply field mapping if configured
-	mappedDoc, err := s.cfg.ApplyFieldMapping(docMap)
+	ctx := context.Background()
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("field mapping failed: %w", err)
+		return fmt.Errorf("begin transaction failed: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	for _, event := range events {
+		docMap := event.After
+		if event.Op == constant.DeleteAction.String() {
+			docMap = event.Before
+		}
+		if len(docMap) == 0 {
+			continue
+		}
+
+		// Apply field mapping if configured
+		mappedDoc, err := s.cfg.ApplyFieldMapping(docMap)
+		if err != nil {
+			return fmt.Errorf("field mapping failed: %w", err)
+		}
+
+		var data map[string]interface{}
+		if err := json.Unmarshal(mappedDoc, &data); err != nil {
+			return fmt.Errorf("unmarshal mapped data failed: %w", err)
+		}
+
+		tableName := event.Table
+		pk, ok := s.cfg.PrimaryKeys[tableName]
+		if !ok {
+			pk = "id" // default to "id"
+		}
+
+		pkValue, ok := data[pk]
+		if !ok && event.Op != constant.CreateAction.String() {
+			return fmt.Errorf("primary key %q not found in data for table %q", pk, tableName)
+		}
+
+		// Self-healing: Ensure table and primary key exist
+		if err := s.ensureTable(ctx, tableName, data, pk); err != nil {
+			return fmt.Errorf("failed to ensure table %s: %w", tableName, err)
+		}
+
+		switch event.Op {
+		case constant.DeleteAction.String():
+			query := fmt.Sprintf("DELETE FROM %s WHERE %s = $1", tableName, pk)
+			if _, err := tx.Exec(ctx, query, pkValue); err != nil {
+				return fmt.Errorf("delete failed: %w", err)
+			}
+		case constant.CreateAction.String(), constant.UpdateAction.String(), constant.SnapshotAction.String():
+			if err := s.upsertTx(ctx, tx, tableName, pk, data); err != nil {
+				return fmt.Errorf("upsert failed: %w", err)
+			}
+		default:
+			slog.Warn("unknown operation type", "op", event.Op)
+		}
 	}
 
-	var data map[string]interface{}
-	if err := json.Unmarshal(mappedDoc, &data); err != nil {
-		return fmt.Errorf("unmarshal mapped data failed: %w", err)
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit transaction failed: %w", err)
 	}
 
-	tableName := event.Table
-	pk, ok := s.cfg.PrimaryKeys[tableName]
-	if !ok {
-		pk = "id" // default to "id"
+	return nil
+}
+
+func (s *PostgresSink) upsertTx(ctx context.Context, tx pgx.Tx, table string, pk string, data map[string]interface{}) error {
+	cols := make([]string, 0, len(data))
+	vals := make([]interface{}, 0, len(data))
+	placeholders := make([]string, 0, len(data))
+	updates := make([]string, 0, len(data)-1)
+
+	i := 1
+	for k, v := range data {
+		cols = append(cols, k)
+		vals = append(vals, v)
+		placeholders = append(placeholders, fmt.Sprintf("$%d", i))
+		if k != pk {
+			updates = append(updates, fmt.Sprintf("%s = EXCLUDED.%s", k, k))
+		}
+		i++
 	}
 
-	pkValue, ok := data[pk]
-	if !ok && event.Op != constant.CreateAction.String() {
-		return fmt.Errorf("primary key %q not found in data for table %q", pk, tableName)
-	}
+	query := fmt.Sprintf(
+		"INSERT INTO %s (%s) VALUES (%s) ON CONFLICT (%s) DO UPDATE SET %s",
+		table,
+		strings.Join(cols, ", "),
+		strings.Join(placeholders, ", "),
+		pk,
+		strings.Join(updates, ", "),
+	)
 
-	// Self-healing: Ensure table and primary key exist
-	if err := s.ensureTable(ctx, tableName, data, pk); err != nil {
-		return fmt.Errorf("failed to ensure table %s: %w", tableName, err)
-	}
-
-	switch event.Op {
-	case constant.DeleteAction.String():
-		query := fmt.Sprintf("DELETE FROM %s WHERE %s = $1", tableName, pk)
-		_, err = s.pool.Exec(ctx, query, pkValue)
-	case constant.CreateAction.String(), constant.UpdateAction.String(), constant.SnapshotAction.String():
-		err = s.upsert(ctx, tableName, pk, data)
-	default:
-		slog.Warn("unknown operation type", "op", event.Op)
-	}
-
+	_, err := tx.Exec(ctx, query, vals...)
 	return err
 }
 
@@ -198,7 +253,7 @@ func (s *PostgresSink) upsert(ctx context.Context, table string, pk string, data
 }
 
 func (s *PostgresSink) Flush() error {
-	return nil // No buffering in this simple implementation
+	return nil
 }
 
 func (s *PostgresSink) Close() error {

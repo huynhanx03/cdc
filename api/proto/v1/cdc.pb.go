@@ -2003,6 +2003,86 @@ func (x *OffsetPaginationResponse) GetSort() []*Sort {
 	return nil
 }
 
+type ReprocessDLQRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReprocessDLQRequest) Reset() {
+	*x = ReprocessDLQRequest{}
+	mi := &file_cdc_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReprocessDLQRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReprocessDLQRequest) ProtoMessage() {}
+
+func (x *ReprocessDLQRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cdc_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReprocessDLQRequest.ProtoReflect.Descriptor instead.
+func (*ReprocessDLQRequest) Descriptor() ([]byte, []int) {
+	return file_cdc_proto_rawDescGZIP(), []int{32}
+}
+
+type ReprocessDLQResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Count         int32                  `protobuf:"varint,1,opt,name=count,proto3" json:"count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReprocessDLQResponse) Reset() {
+	*x = ReprocessDLQResponse{}
+	mi := &file_cdc_proto_msgTypes[33]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReprocessDLQResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReprocessDLQResponse) ProtoMessage() {}
+
+func (x *ReprocessDLQResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cdc_proto_msgTypes[33]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReprocessDLQResponse.ProtoReflect.Descriptor instead.
+func (*ReprocessDLQResponse) Descriptor() ([]byte, []int) {
+	return file_cdc_proto_rawDescGZIP(), []int{33}
+}
+
+func (x *ReprocessDLQResponse) GetCount() int32 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
 var File_cdc_proto protoreflect.FileDescriptor
 
 const file_cdc_proto_rawDesc = "" +
@@ -2199,7 +2279,10 @@ const file_cdc_proto_rawDesc = "" +
 	"\x04page\x18\x03 \x01(\rR\x04page\x12\x19\n" +
 	"\bhas_next\x18\x04 \x01(\bR\ahasNext\x12\x19\n" +
 	"\bhas_prev\x18\x05 \x01(\bR\ahasPrev\x12 \n" +
-	"\x04sort\x18\x06 \x03(\v2\f.cdc.v1.SortR\x04sort*c\n" +
+	"\x04sort\x18\x06 \x03(\v2\f.cdc.v1.SortR\x04sort\"\x15\n" +
+	"\x13ReprocessDLQRequest\",\n" +
+	"\x14ReprocessDLQResponse\x12\x14\n" +
+	"\x05count\x18\x01 \x01(\x05R\x05count*c\n" +
 	"\rMessageStatus\x12\x1e\n" +
 	"\x1aMESSAGE_STATUS_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13MESSAGE_STATUS_SENT\x10\x01\x12\x19\n" +
@@ -2207,7 +2290,7 @@ const file_cdc_proto_rawDesc = "" +
 	"\tSortOrder\x12\x1a\n" +
 	"\x16SORT_ORDER_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eSORT_ORDER_ASC\x10\x01\x12\x13\n" +
-	"\x0fSORT_ORDER_DESC\x10\x022\xc9\b\n" +
+	"\x0fSORT_ORDER_DESC\x10\x022\xb3\t\n" +
 	"\n" +
 	"CDCService\x12^\n" +
 	"\vHealthCheck\x12\x1a.cdc.v1.HealthCheckRequest\x1a\x1b.cdc.v1.HealthCheckResponse\"\x16\x82\xd3\xe4\x93\x02\x10\x12\x0e/api/v1/health\x12X\n" +
@@ -2222,7 +2305,8 @@ const file_cdc_proto_rawDesc = "" +
 	"\x0fGetConsumerInfo\x12\x1e.cdc.v1.GetConsumerInfoRequest\x1a\x1f.cdc.v1.GetConsumerInfoResponse\"\x18\x82\xd3\xe4\x93\x02\x12\x12\x10/api/v1/consumer\x12[\n" +
 	"\n" +
 	"ListTopics\x12\x19.cdc.v1.ListTopicsRequest\x1a\x1a.cdc.v1.ListTopicsResponse\"\x16\x82\xd3\xe4\x93\x02\x10\x12\x0e/api/v1/topics\x12k\n" +
-	"\x0eListPartitions\x12\x1d.cdc.v1.ListPartitionsRequest\x1a\x1e.cdc.v1.ListPartitionsResponse\"\x1a\x82\xd3\xe4\x93\x02\x14\x12\x12/api/v1/partitionsB)Z'github.com/foden/cdc/api/proto/v1;cdcpbb\x06proto3"
+	"\x0eListPartitions\x12\x1d.cdc.v1.ListPartitionsRequest\x1a\x1e.cdc.v1.ListPartitionsResponse\"\x1a\x82\xd3\xe4\x93\x02\x14\x12\x12/api/v1/partitions\x12h\n" +
+	"\fReprocessDLQ\x12\x1b.cdc.v1.ReprocessDLQRequest\x1a\x1c.cdc.v1.ReprocessDLQResponse\"\x1d\x82\xd3\xe4\x93\x02\x17\"\x15/api/v1/dlq/reprocessB)Z'github.com/foden/cdc/api/proto/v1;cdcpbb\x06proto3"
 
 var (
 	file_cdc_proto_rawDescOnce sync.Once
@@ -2237,7 +2321,7 @@ func file_cdc_proto_rawDescGZIP() []byte {
 }
 
 var file_cdc_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_cdc_proto_msgTypes = make([]protoimpl.MessageInfo, 37)
+var file_cdc_proto_msgTypes = make([]protoimpl.MessageInfo, 39)
 var file_cdc_proto_goTypes = []any{
 	(MessageStatus)(0),               // 0: cdc.v1.MessageStatus
 	(SortOrder)(0),                   // 1: cdc.v1.SortOrder
@@ -2273,27 +2357,29 @@ var file_cdc_proto_goTypes = []any{
 	(*OffsetPaginationRequest)(nil),  // 31: cdc.v1.OffsetPaginationRequest
 	(*Sort)(nil),                     // 32: cdc.v1.Sort
 	(*OffsetPaginationResponse)(nil), // 33: cdc.v1.OffsetPaginationResponse
-	nil,                              // 34: cdc.v1.SinkConfig.IndexMappingEntry
-	nil,                              // 35: cdc.v1.SinkConfig.FieldMappingEntry
-	nil,                              // 36: cdc.v1.GetStatsResponse.SourceStatsEntry
-	nil,                              // 37: cdc.v1.GetStatsResponse.SinkStatsEntry
-	nil,                              // 38: cdc.v1.MessageItem.HeadersEntry
+	(*ReprocessDLQRequest)(nil),      // 34: cdc.v1.ReprocessDLQRequest
+	(*ReprocessDLQResponse)(nil),     // 35: cdc.v1.ReprocessDLQResponse
+	nil,                              // 36: cdc.v1.SinkConfig.IndexMappingEntry
+	nil,                              // 37: cdc.v1.SinkConfig.FieldMappingEntry
+	nil,                              // 38: cdc.v1.GetStatsResponse.SourceStatsEntry
+	nil,                              // 39: cdc.v1.GetStatsResponse.SinkStatsEntry
+	nil,                              // 40: cdc.v1.MessageItem.HeadersEntry
 }
 var file_cdc_proto_depIdxs = []int32{
 	4,  // 0: cdc.v1.GetConfigResponse.config:type_name -> cdc.v1.AppConfig
 	5,  // 1: cdc.v1.AppConfig.sources:type_name -> cdc.v1.SourceConfig
 	6,  // 2: cdc.v1.AppConfig.sinks:type_name -> cdc.v1.SinkConfig
-	34, // 3: cdc.v1.SinkConfig.index_mapping:type_name -> cdc.v1.SinkConfig.IndexMappingEntry
-	35, // 4: cdc.v1.SinkConfig.field_mapping:type_name -> cdc.v1.SinkConfig.FieldMappingEntry
+	36, // 3: cdc.v1.SinkConfig.index_mapping:type_name -> cdc.v1.SinkConfig.IndexMappingEntry
+	37, // 4: cdc.v1.SinkConfig.field_mapping:type_name -> cdc.v1.SinkConfig.FieldMappingEntry
 	5,  // 5: cdc.v1.AddSourceRequest.source:type_name -> cdc.v1.SourceConfig
 	6,  // 6: cdc.v1.AddSinkRequest.sink:type_name -> cdc.v1.SinkConfig
-	36, // 7: cdc.v1.GetStatsResponse.source_stats:type_name -> cdc.v1.GetStatsResponse.SourceStatsEntry
-	37, // 8: cdc.v1.GetStatsResponse.sink_stats:type_name -> cdc.v1.GetStatsResponse.SinkStatsEntry
+	38, // 7: cdc.v1.GetStatsResponse.source_stats:type_name -> cdc.v1.GetStatsResponse.SourceStatsEntry
+	39, // 8: cdc.v1.GetStatsResponse.sink_stats:type_name -> cdc.v1.GetStatsResponse.SinkStatsEntry
 	0,  // 9: cdc.v1.ListMessagesRequest.status:type_name -> cdc.v1.MessageStatus
 	31, // 10: cdc.v1.ListMessagesRequest.pagination:type_name -> cdc.v1.OffsetPaginationRequest
 	22, // 11: cdc.v1.ListMessagesResponse.data:type_name -> cdc.v1.MessageItem
 	33, // 12: cdc.v1.ListMessagesResponse.pagination:type_name -> cdc.v1.OffsetPaginationResponse
-	38, // 13: cdc.v1.MessageItem.headers:type_name -> cdc.v1.MessageItem.HeadersEntry
+	40, // 13: cdc.v1.MessageItem.headers:type_name -> cdc.v1.MessageItem.HeadersEntry
 	31, // 14: cdc.v1.ListTopicsRequest.pagination:type_name -> cdc.v1.OffsetPaginationRequest
 	27, // 15: cdc.v1.ListTopicsResponse.data:type_name -> cdc.v1.TopicSummary
 	33, // 16: cdc.v1.ListTopicsResponse.pagination:type_name -> cdc.v1.OffsetPaginationResponse
@@ -2316,19 +2402,21 @@ var file_cdc_proto_depIdxs = []int32{
 	23, // 33: cdc.v1.CDCService.GetConsumerInfo:input_type -> cdc.v1.GetConsumerInfoRequest
 	25, // 34: cdc.v1.CDCService.ListTopics:input_type -> cdc.v1.ListTopicsRequest
 	28, // 35: cdc.v1.CDCService.ListPartitions:input_type -> cdc.v1.ListPartitionsRequest
-	16, // 36: cdc.v1.CDCService.HealthCheck:output_type -> cdc.v1.HealthCheckResponse
-	3,  // 37: cdc.v1.CDCService.GetConfig:output_type -> cdc.v1.GetConfigResponse
-	8,  // 38: cdc.v1.CDCService.AddSource:output_type -> cdc.v1.AddSourceResponse
-	10, // 39: cdc.v1.CDCService.RemoveSource:output_type -> cdc.v1.RemoveSourceResponse
-	12, // 40: cdc.v1.CDCService.AddSink:output_type -> cdc.v1.AddSinkResponse
-	14, // 41: cdc.v1.CDCService.RemoveSink:output_type -> cdc.v1.RemoveSinkResponse
-	18, // 42: cdc.v1.CDCService.GetStats:output_type -> cdc.v1.GetStatsResponse
-	21, // 43: cdc.v1.CDCService.ListMessages:output_type -> cdc.v1.ListMessagesResponse
-	24, // 44: cdc.v1.CDCService.GetConsumerInfo:output_type -> cdc.v1.GetConsumerInfoResponse
-	26, // 45: cdc.v1.CDCService.ListTopics:output_type -> cdc.v1.ListTopicsResponse
-	29, // 46: cdc.v1.CDCService.ListPartitions:output_type -> cdc.v1.ListPartitionsResponse
-	36, // [36:47] is the sub-list for method output_type
-	25, // [25:36] is the sub-list for method input_type
+	34, // 36: cdc.v1.CDCService.ReprocessDLQ:input_type -> cdc.v1.ReprocessDLQRequest
+	16, // 37: cdc.v1.CDCService.HealthCheck:output_type -> cdc.v1.HealthCheckResponse
+	3,  // 38: cdc.v1.CDCService.GetConfig:output_type -> cdc.v1.GetConfigResponse
+	8,  // 39: cdc.v1.CDCService.AddSource:output_type -> cdc.v1.AddSourceResponse
+	10, // 40: cdc.v1.CDCService.RemoveSource:output_type -> cdc.v1.RemoveSourceResponse
+	12, // 41: cdc.v1.CDCService.AddSink:output_type -> cdc.v1.AddSinkResponse
+	14, // 42: cdc.v1.CDCService.RemoveSink:output_type -> cdc.v1.RemoveSinkResponse
+	18, // 43: cdc.v1.CDCService.GetStats:output_type -> cdc.v1.GetStatsResponse
+	21, // 44: cdc.v1.CDCService.ListMessages:output_type -> cdc.v1.ListMessagesResponse
+	24, // 45: cdc.v1.CDCService.GetConsumerInfo:output_type -> cdc.v1.GetConsumerInfoResponse
+	26, // 46: cdc.v1.CDCService.ListTopics:output_type -> cdc.v1.ListTopicsResponse
+	29, // 47: cdc.v1.CDCService.ListPartitions:output_type -> cdc.v1.ListPartitionsResponse
+	35, // 48: cdc.v1.CDCService.ReprocessDLQ:output_type -> cdc.v1.ReprocessDLQResponse
+	37, // [37:49] is the sub-list for method output_type
+	25, // [25:37] is the sub-list for method input_type
 	25, // [25:25] is the sub-list for extension type_name
 	25, // [25:25] is the sub-list for extension extendee
 	0,  // [0:25] is the sub-list for field type_name
@@ -2348,7 +2436,7 @@ func file_cdc_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cdc_proto_rawDesc), len(file_cdc_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   37,
+			NumMessages:   39,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

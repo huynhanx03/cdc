@@ -3,10 +3,9 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"github.com/google/cel-go/cel"
-	"github.com/google/cel-go/common/types"
-	"github.com/google/cel-go/common/types/ref"
 	"github.com/spf13/viper"
 )
 
@@ -24,18 +23,18 @@ type Config struct {
 
 // SourceConfig holds the configuration for the CDC source.
 type SourceConfig struct {
-	InstanceID      string   `mapstructure:"instance_id" json:"instance_id,omitempty"`
-	Name            string   `mapstructure:"name" json:"name,omitempty"`
-	Type            string   `mapstructure:"type" json:"type"`
-	Topic           string   `mapstructure:"topic" json:"topic,omitempty"`
-	Host            string   `mapstructure:"host" json:"host"`
-	Port            int      `mapstructure:"port" json:"port"`
-	Username        string   `mapstructure:"username"`
-	Password        string   `mapstructure:"password"`
-	Database        string   `mapstructure:"database"`
-	Tables          []string `mapstructure:"tables"`
-	SlotName        string   `mapstructure:"slot_name"`
-	PublicationName string   `mapstructure:"publication_name"`
+	InstanceID        string            `mapstructure:"instance_id" json:"instance_id,omitempty"`
+	Name              string            `mapstructure:"name" json:"name,omitempty"`
+	Type              string            `mapstructure:"type" json:"type"`
+	Topic             string            `mapstructure:"topic" json:"topic,omitempty"`
+	Host              string            `mapstructure:"host" json:"host"`
+	Port              int               `mapstructure:"port" json:"port"`
+	Username          string            `mapstructure:"username"`
+	Password          string            `mapstructure:"password"`
+	Database          string            `mapstructure:"database"`
+	Tables            []string          `mapstructure:"tables"`
+	SlotName          string            `mapstructure:"slot_name"`
+	PublicationName   string            `mapstructure:"publication_name"`
 	SnapshotMode      string            `mapstructure:"snapshot_mode" json:"snapshot_mode,omitempty"`
 	URL               string            `mapstructure:"url" json:"url,omitempty"`
 	Headers           map[string]string `mapstructure:"headers" json:"headers,omitempty"`
@@ -46,6 +45,8 @@ type SourceConfig struct {
 type PipelineConfig struct {
 	ChannelBufferSize int      `mapstructure:"channel_buffer_size"`
 	WorkerCount       int      `mapstructure:"worker_count"`
+	BatchSize         int      `mapstructure:"batch_size"`
+	FlushIntervalMs   int      `mapstructure:"flush_interval_ms"`
 	SubjectFilter     []string `mapstructure:"subject_filter"`
 }
 
@@ -85,34 +86,53 @@ type SinkConfig struct {
 	FlushIntervalMs int32             `mapstructure:"flush_interval_ms"`
 	MaxRetries      int32             `mapstructure:"max_retries"`
 	RetryBaseMs     int32             `mapstructure:"retry_base_ms"`
+
+	// Internal compiled programs
+	programs     map[string]cel.Program
+	programsOnce sync.Once
 }
 
 // NATSConfig holds the configuration for NATS JetStream.
 type NATSConfig struct {
-	Enabled       bool   `mapstructure:"enabled"`
-	URL           string `mapstructure:"url"`
-	StreamName    string `mapstructure:"stream_name"`
-	RetentionDays int32  `mapstructure:"retention_days"`
+	Enabled            bool   `mapstructure:"enabled"`
+	URL                string `mapstructure:"url"`
+	StreamName         string `mapstructure:"stream_name"`
+	RetentionDays      int32  `mapstructure:"retention_days"`
+	MaxReconnects      int    `mapstructure:"max_reconnects"`
+	ReconnectWaitMs    int    `mapstructure:"reconnect_wait_ms"`
+	ReconnectBufSizeMb int    `mapstructure:"reconnect_buffer_size_mb"`
+
+	MaxAckPending int `mapstructure:"max_ack_pending"`
+	AckWaitMs     int `mapstructure:"ack_wait_ms"`
+	MaxDeliver    int `mapstructure:"max_deliver"`
 }
 
-// LoadConfig loads the configuration from the specified path.
+// LoadConfig loads the configuration from the given path.
 func LoadConfig(path string) (*Config, error) {
-	viper.SetConfigFile(path)
-	viper.AutomaticEnv()
+	v := viper.New()
+	v.SetConfigFile(path)
+	v.AutomaticEnv()
 
-	if err := viper.ReadInConfig(); err != nil {
+	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
 	var cfg Config
-	if err := viper.Unmarshal(&cfg); err != nil {
+	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
 	cfg.applyDefaults()
 
 	if err := cfg.validate(); err != nil {
-		return nil, fmt.Errorf("config validation error: %w", err)
+		return nil, fmt.Errorf("validation error: %w", err)
+	}
+
+	// Warm up CEL programs
+	for i := range cfg.Sinks {
+		if err := cfg.Sinks[i].CompileTransformations(); err != nil {
+			return nil, fmt.Errorf("sink %s CEL error: %w", cfg.Sinks[i].InstanceID, err)
+		}
 	}
 
 	return &cfg, nil
@@ -123,30 +143,25 @@ func (c *Config) applyDefaults() {
 	if c.LogMode == "" {
 		c.LogMode = "text"
 	}
+
+	// Pipeline defaults
 	if c.Pipeline.ChannelBufferSize <= 0 {
 		c.Pipeline.ChannelBufferSize = 10000
 	}
 	if c.Pipeline.WorkerCount <= 0 {
 		c.Pipeline.WorkerCount = 4
 	}
-	for i := range c.Sources {
-		if c.Sources[i].SlotName == "" {
-			c.Sources[i].SlotName = "cdc_slot"
-		}
-		if c.Sources[i].PublicationName == "" {
-			c.Sources[i].PublicationName = "cdc_pub"
-		}
-		if c.Sources[i].InstanceID == "" {
-			c.Sources[i].InstanceID = fmt.Sprintf("source_%d", i)
-		}
-		if c.Sources[i].PollingIntervalMs <= 0 {
-			c.Sources[i].PollingIntervalMs = 5000 // default 5 seconds
-		}
+	if c.Pipeline.BatchSize <= 0 {
+		c.Pipeline.BatchSize = 100
+	}
+	if c.Pipeline.FlushIntervalMs <= 0 {
+		c.Pipeline.FlushIntervalMs = 1000
 	}
 	if len(c.Pipeline.SubjectFilter) == 0 {
 		c.Pipeline.SubjectFilter = []string{"cdc.>"}
 	}
 
+	// UI & Server defaults
 	if c.UI.Port <= 0 {
 		c.UI.Port = 9092
 	}
@@ -156,26 +171,45 @@ func (c *Config) applyDefaults() {
 	if c.Server.HTTPPort <= 0 {
 		c.Server.HTTPPort = 9091
 	}
-	for i := range c.Sinks {
-		if c.Sinks[i].InstanceID == "" {
-			c.Sinks[i].InstanceID = fmt.Sprintf("sink_%d", i)
+
+	for i := range c.Sources {
+		s := &c.Sources[i]
+		if s.InstanceID == "" {
+			s.InstanceID = fmt.Sprintf("source_%d", i)
 		}
-		if c.Sinks[i].BatchSize <= 0 {
-			c.Sinks[i].BatchSize = 500
+		if s.SlotName == "" {
+			s.SlotName = "cdc_slot"
 		}
-		if c.Sinks[i].FlushIntervalMs <= 0 {
-			c.Sinks[i].FlushIntervalMs = 1000 // 1 second
+		if s.PublicationName == "" {
+			s.PublicationName = "cdc_pub"
 		}
-		if c.Sinks[i].IndexPrefix == "" {
-			c.Sinks[i].IndexPrefix = "cdc_"
-		}
-		if c.Sinks[i].MaxRetries <= 0 {
-			c.Sinks[i].MaxRetries = 10
-		}
-		if c.Sinks[i].RetryBaseMs <= 0 {
-			c.Sinks[i].RetryBaseMs = 1000
+		if s.PollingIntervalMs <= 0 {
+			s.PollingIntervalMs = 5000
 		}
 	}
+
+	for i := range c.Sinks {
+		s := &c.Sinks[i]
+		if s.InstanceID == "" {
+			s.InstanceID = fmt.Sprintf("sink_%d", i)
+		}
+		if s.BatchSize <= 0 {
+			s.BatchSize = 500
+		}
+		if s.FlushIntervalMs <= 0 {
+			s.FlushIntervalMs = 1000
+		}
+		if s.IndexPrefix == "" {
+			s.IndexPrefix = "cdc_"
+		}
+		if s.MaxRetries <= 0 {
+			s.MaxRetries = 10
+		}
+		if s.RetryBaseMs <= 0 {
+			s.RetryBaseMs = 1000
+		}
+	}
+
 	if c.NATS.Enabled {
 		if c.NATS.URL == "" {
 			c.NATS.URL = "nats://127.0.0.1:4222"
@@ -186,6 +220,24 @@ func (c *Config) applyDefaults() {
 		if c.NATS.RetentionDays <= 0 {
 			c.NATS.RetentionDays = 7
 		}
+		if c.NATS.MaxReconnects == 0 {
+			c.NATS.MaxReconnects = -1
+		}
+		if c.NATS.ReconnectWaitMs <= 0 {
+			c.NATS.ReconnectWaitMs = 2000
+		}
+		if c.NATS.ReconnectBufSizeMb <= 0 {
+			c.NATS.ReconnectBufSizeMb = 64
+		}
+		if c.NATS.MaxAckPending <= 0 {
+			c.NATS.MaxAckPending = 256
+		}
+		if c.NATS.AckWaitMs <= 0 {
+			c.NATS.AckWaitMs = 30000 // 30s
+		}
+		if c.NATS.MaxDeliver <= 0 {
+			c.NATS.MaxDeliver = 10
+		}
 	}
 }
 
@@ -195,14 +247,8 @@ func (c *Config) validate() error {
 		return fmt.Errorf("at least one source is required")
 	}
 	for i, s := range c.Sources {
-		if s.Type == "" {
-			return fmt.Errorf("sources[%d].type is required", i)
-		}
-		if s.Host == "" {
-			return fmt.Errorf("sources[%d].host is required", i)
-		}
-		if s.Database == "" {
-			return fmt.Errorf("sources[%d].database is required", i)
+		if s.Type == "" || s.Host == "" || s.Database == "" {
+			return fmt.Errorf("source[%d] requires type, host, and database", i)
 		}
 	}
 	if len(c.Sinks) == 0 {
@@ -211,7 +257,40 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// ApplyFieldMapping applies the configured field mapping and CEL transformations to the given JSON data.
+// CompileTransformations builds CEL programs once.
+// We use sync.Once to ensure thread-safety and avoid redundant compilations.
+func (s *SinkConfig) CompileTransformations() error {
+	var err error
+	s.programsOnce.Do(func() {
+		if len(s.Transformations) == 0 {
+			return
+		}
+		env, envErr := cel.NewEnv(
+			cel.Variable("data", cel.MapType(cel.StringType, cel.AnyType)),
+		)
+		if envErr != nil {
+			err = envErr
+			return
+		}
+		s.programs = make(map[string]cel.Program)
+		for field, expr := range s.Transformations {
+			ast, iss := env.Compile(expr)
+			if iss.Err() != nil {
+				err = fmt.Errorf("compilation error %s: %w", field, iss.Err())
+				return
+			}
+			prog, progErr := env.Program(ast)
+			if progErr != nil {
+				err = fmt.Errorf("program error %s: %w", field, progErr)
+				return
+			}
+			s.programs[field] = prog
+		}
+	})
+	return err
+}
+
+// ApplyFieldMapping transforms the record payload.
 func (s *SinkConfig) ApplyFieldMapping(data []byte) ([]byte, error) {
 	if len(s.FieldMapping) == 0 && len(s.Transformations) == 0 {
 		return data, nil
@@ -219,50 +298,26 @@ func (s *SinkConfig) ApplyFieldMapping(data []byte) ([]byte, error) {
 
 	var m map[string]interface{}
 	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal for mapping: %w", err)
+		return nil, fmt.Errorf("unmarshal error: %w", err)
 	}
 
-	// 1. apply simple renaming mapping
-	for srcField, targetField := range s.FieldMapping {
-		if val, ok := m[srcField]; ok {
-			m[targetField] = val
-			delete(m, srcField)
+	// 1. Rename fields
+	for src, dest := range s.FieldMapping {
+		if val, ok := m[src]; ok {
+			m[dest] = val
+			delete(m, src)
 		}
 	}
 
-	// 2. apply CEL transformations if any
-	if len(s.Transformations) > 0 {
-		env, err := cel.NewEnv(
-			cel.Variable("data", cel.MapType(cel.StringType, cel.AnyType)),
-		)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create CEL env: %w", err)
-		}
-
-		for field, expr := range s.Transformations {
-			ast, iss := env.Compile(expr)
-			if iss.Err() != nil {
-				return nil, fmt.Errorf("CEL compile error for field %s: %v", field, iss.Err())
-			}
-			program, err := env.Program(ast)
+	// 2. CEL Transformations
+	if len(s.programs) > 0 {
+		input := map[string]interface{}{"data": m}
+		for field, prog := range s.programs {
+			out, _, err := prog.Eval(input)
 			if err != nil {
-				return nil, fmt.Errorf("CEL program error for field %s: %w", field, err)
+				return nil, fmt.Errorf("eval error on %s: %w", field, err)
 			}
-
-			out, _, err := program.Eval(map[string]interface{}{"data": m})
-			if err != nil {
-				return nil, fmt.Errorf("CEL eval error for field %s: %w", field, err)
-			}
-
-			// Convert CEL output back to native Go
 			m[field] = out.Value()
-			if v, ok := out.Value().(ref.Val); ok {
-				m[field] = v.Value()
-			} else if out == types.True {
-				m[field] = true
-			} else if out == types.False {
-				m[field] = false
-			}
 		}
 	}
 

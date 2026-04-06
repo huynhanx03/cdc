@@ -107,10 +107,19 @@ func (p *PostgresSource) runSnapshot(ctx context.Context) error {
 	defer conn.Close(ctx)
 
 	for _, tableName := range p.cfg.Tables {
-		quoted := utils.QuoteIdent(tableName)
-		rows, err := conn.Query(ctx, fmt.Sprintf("SELECT * FROM %s", quoted))
+		// Use a transaction and cursor for chunked fetching to prevent OOM on large tables
+		tx, err := conn.Begin(ctx)
 		if err != nil {
-			slog.Error("snapshot query failed", "table", tableName, "err", err)
+			slog.Error("failed to start snapshot transaction", "table", tableName, "err", err)
+			continue
+		}
+
+		quoted := utils.QuoteIdent(tableName)
+		cursorName := "cdc_snapshot_cursor"
+		_, err = tx.Exec(ctx, fmt.Sprintf("DECLARE %s CURSOR FOR SELECT * FROM %s", cursorName, quoted))
+		if err != nil {
+			slog.Error("failed to declare snapshot cursor", "table", tableName, "err", err)
+			tx.Rollback(ctx)
 			continue
 		}
 
@@ -122,30 +131,47 @@ func (p *PostgresSource) runSnapshot(ctx context.Context) error {
 			table = parts[1]
 		}
 
-		fields := rows.FieldDescriptions()
-		count := 0
-		for rows.Next() {
-			vals, err := rows.Values()
+		totalCount := 0
+		for {
+			rows, err := tx.Query(ctx, fmt.Sprintf("FETCH 1000 FROM %s", cursorName))
 			if err != nil {
-				slog.Error("read snapshot row failed", "table", tableName, "err", err)
-				continue
+				slog.Error("snapshot fetch failed", "table", tableName, "err", err)
+				break
 			}
 
-			obj := make(map[string]interface{})
-			for i, field := range fields {
-				obj[field.Name] = vals[i]
-			}
-			after, _ := json.Marshal(obj)
+			fields := rows.FieldDescriptions()
+			count := 0
+			for rows.Next() {
+				vals, err := rows.Values()
+				if err != nil {
+					slog.Error("read snapshot row failed", "table", tableName, "err", err)
+					continue
+				}
 
-			topic := p.cfg.Topic
-			if topic == "" {
-				topic = "cdc"
+				obj := make(map[string]interface{})
+				for i, field := range fields {
+					obj[field.Name] = vals[i]
+				}
+				after, _ := json.Marshal(obj)
+
+				topic := p.cfg.Topic
+				if topic == "" {
+					topic = "cdc"
+				}
+				p.pipeline <- models.NewEvent(topic, constant.SnapshotAction.String(), p.cfg.InstanceID, schema, table, nil, after, 0, "snapshot")
+				count++
+				totalCount++
 			}
-			p.pipeline <- models.NewEvent(topic, constant.SnapshotAction.String(), p.cfg.InstanceID, schema, table, nil, after, 0, "snapshot")
-			count++
+			rows.Close()
+
+			if count == 0 {
+				break // End of table
+			}
+			slog.Debug("snapshot chunk processed", "table", tableName, "count", totalCount)
 		}
-		rows.Close()
-		slog.Info("snapshot table completed", "table", tableName, "rows", count)
+
+		tx.Commit(ctx)
+		slog.Info("snapshot table completed", "table", tableName, "rows", totalCount)
 	}
 	slog.Info("snapshot process finished")
 	return nil
@@ -235,6 +261,18 @@ func (p *PostgresSource) buildCreatePublicationSQL(pubName string) string {
 
 // connectAndStartReplication opens a replication connection and launches the read loop.
 func (p *PostgresSource) connectAndStartReplication(ackCh <-chan uint64, startLSN pglogrepl.LSN) error {
+	if err := p.doConnect(startLSN); err != nil {
+		return err
+	}
+
+	slog.Info("postgres logical replication started", "slot", p.cfg.SlotName, "lsn", startLSN)
+	go p.ackLoop(ackCh)
+	go p.readLoopWithReconnect(startLSN)
+	return nil
+}
+
+// doConnect establishes the replication connection and starts replication.
+func (p *PostgresSource) doConnect(startLSN pglogrepl.LSN) error {
 	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?replication=database",
 		p.cfg.Username, p.cfg.Password, p.cfg.Host, p.cfg.Port, p.cfg.Database)
 
@@ -260,8 +298,6 @@ func (p *PostgresSource) connectAndStartReplication(ackCh <-chan uint64, startLS
 		return fmt.Errorf("IdentifySystem failed: %w", err)
 	}
 
-	// Use provided startLSN if it's explicitly set and non-zero
-	// Otherwise use sysident.XLogPos (current server position)
 	replicationStartLSN := sysident.XLogPos
 	if startLSN > 0 {
 		replicationStartLSN = startLSN
@@ -278,10 +314,70 @@ func (p *PostgresSource) connectAndStartReplication(ackCh <-chan uint64, startLS
 		return fmt.Errorf("StartReplication failed: %w", err)
 	}
 
-	slog.Info("postgres logical replication started", "slot", slotName, "publication", pubName, "lsn", replicationStartLSN)
-	go p.ackLoop(ackCh)
-	go p.readLoop(replicationStartLSN)
 	return nil
+}
+
+// readLoopWithReconnect wraps readLoop with auto-reconnection on failure.
+// Uses exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s (capped at 32s).
+func (p *PostgresSource) readLoopWithReconnect(startLSN pglogrepl.LSN) {
+	backoff := 1 * time.Second
+	maxBackoff := 32 * time.Second
+
+	for {
+		select {
+		case <-p.stop:
+			return
+		default:
+		}
+
+		// readLoop returns on error — we reconnect
+		exitReason := p.readLoop(startLSN)
+
+		select {
+		case <-p.stop:
+			return
+		default:
+		}
+
+		slog.Warn("readLoop exited, attempting reconnect",
+			"instance", p.cfg.InstanceID,
+			"reason", exitReason,
+			"backoff", backoff)
+
+		// Close old connection
+		if p.conn != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			p.conn.Close(ctx)
+			cancel()
+		}
+
+		// Wait before reconnecting
+		select {
+		case <-time.After(backoff):
+		case <-p.stop:
+			return
+		}
+
+		// Use last flushed LSN as resume point
+		resumeLSN := pglogrepl.LSN(atomic.LoadUint64(&p.flushedLSN))
+		if resumeLSN == 0 {
+			resumeLSN = startLSN
+		}
+
+		if err := p.doConnect(resumeLSN); err != nil {
+			slog.Error("reconnect failed", "instance", p.cfg.InstanceID, "err", err)
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			continue
+		}
+
+		// Reset backoff on successful reconnect
+		backoff = 1 * time.Second
+		startLSN = resumeLSN
+		slog.Info("reconnected successfully", "instance", p.cfg.InstanceID, "resume_lsn", resumeLSN)
+	}
 }
 
 // ackLoop continuously receives ACKs from the pipeline and updates the highest flushed LSN.
@@ -304,7 +400,8 @@ func (p *PostgresSource) ackLoop(ackCh <-chan uint64) {
 }
 
 // readLoop continuously reads WAL messages and dispatches CDC events.
-func (p *PostgresSource) readLoop(startLSN pglogrepl.LSN) {
+// Returns a reason string when it exits (for reconnect logging).
+func (p *PostgresSource) readLoop(startLSN pglogrepl.LSN) string {
 	clientLSN := startLSN
 	nextStandby := time.Now().Add(_standbyInterval)
 	relations := make(map[uint32]*pglogrepl.RelationMessage)
@@ -312,7 +409,7 @@ func (p *PostgresSource) readLoop(startLSN pglogrepl.LSN) {
 	for {
 		select {
 		case <-p.stop:
-			return
+			return "stopped"
 		default:
 		}
 
@@ -327,12 +424,12 @@ func (p *PostgresSource) readLoop(startLSN pglogrepl.LSN) {
 				continue
 			}
 			slog.Error("receive message failed", "err", err)
-			return
+			return fmt.Sprintf("receive error: %v", err)
 		}
 
 		if errMsg, ok := rawMsg.(*pgproto3.ErrorResponse); ok {
 			slog.Error("postgres error response", "severity", errMsg.Severity, "message", errMsg.Message)
-			return
+			return fmt.Sprintf("postgres error: %s", errMsg.Message)
 		}
 
 		msg, ok := rawMsg.(*pgproto3.CopyData)
