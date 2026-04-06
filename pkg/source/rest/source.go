@@ -39,7 +39,12 @@ func New(cfg *config.SourceConfig) *RESTSource {
 // Start begins the polling loop.
 func (s *RESTSource) Start(pipeline chan<- *models.Event, ackCh <-chan uint64, initialOffset string) error {
 	slog.Info("Starting REST source", "url", s.cfg.URL, "interval_ms", s.cfg.PollingIntervalMs)
-	
+
+	go s.pollLoop(pipeline, ackCh)
+	return nil
+}
+
+func (s *RESTSource) pollLoop(pipeline chan<- *models.Event, ackCh <-chan uint64) {
 	ticker := time.NewTicker(time.Duration(s.cfg.PollingIntervalMs) * time.Millisecond)
 	defer ticker.Stop()
 
@@ -49,7 +54,7 @@ func (s *RESTSource) Start(pipeline chan<- *models.Event, ackCh <-chan uint64, i
 	for {
 		select {
 		case <-s.stopCh:
-			return nil
+			return
 		case <-ticker.C:
 			s.pollAndSend(pipeline)
 		case <-ackCh:

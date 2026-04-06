@@ -346,22 +346,30 @@ func (e *Engine) flushAndAck(sink interfaces.Sink, msgs []jetstream.Msg, lsnKeys
 func (e *Engine) Stop() {
 	slog.Info("stopping pipeline engine")
 
+	// Lock only to snapshot data and close channels — no blocking I/O under lock.
 	e.mu.Lock()
-	defer e.mu.Unlock()
+	sourcesToStop := make([]interfaces.Source, len(e.sources))
+	copy(sourcesToStop, e.sources)
 
-	for _, src := range e.sources {
+	cancelsToCall := make([]context.CancelFunc, 0, len(e.sinkCancels))
+	for _, cancel := range e.sinkCancels {
+		cancelsToCall = append(cancelsToCall, cancel)
+	}
+
+	close(e.eventCh) // Stops producer
+	close(e.stopCh)  // Globally stops workers
+	e.mu.Unlock()
+
+	// Blocking operations outside lock — no deadlock risk.
+	for _, src := range sourcesToStop {
 		if err := src.Stop(); err != nil {
 			slog.Error("source stop error", "instance_id", src.InstanceID(), _nameErr, err)
 		}
 	}
 
-	close(e.eventCh) // Stops producer
-	close(e.stopCh)  // Globally stops workers
-
-	for _, cancel := range e.sinkCancels {
+	for _, cancel := range cancelsToCall {
 		cancel()
 	}
-	e.mu.Unlock()
 
 	e.wg.Wait()
 
