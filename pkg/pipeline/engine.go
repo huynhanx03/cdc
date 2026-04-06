@@ -188,28 +188,7 @@ func (e *Engine) producer() {
 				batch = batch[:0] // Reset slice nhưng giữ nguyên capacity
 			}
 
-			// Apply filters — skip events that don't pass
-			skip := false
-			for _, f := range e.filters {
-				if !f(ev) {
-					skip = true
-					break
-				}
-			}
-			if skip {
-				continue
-			}
 
-			// Apply transformers
-			for _, t := range e.transformers {
-				ev = t(ev)
-			}
-
-			batch = append(batch, ev)
-			if len(batch) >= e.batchSize {
-				e.publishBatch(subjectFunc, batch)
-				batch = batch[:0]
-			}
 		case <-flushTicker.C:
 			if len(batch) > 0 {
 				e.publishBatch(subjectFunc, batch)
