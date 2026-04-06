@@ -20,6 +20,7 @@ import (
 	"github.com/foden/cdc/pkg/interfaces"
 	"github.com/foden/cdc/pkg/models"
 	"github.com/foden/cdc/pkg/registry"
+	"github.com/foden/cdc/pkg/utils"
 )
 
 const (
@@ -106,7 +107,8 @@ func (p *PostgresSource) runSnapshot(ctx context.Context) error {
 	defer conn.Close(ctx)
 
 	for _, tableName := range p.cfg.Tables {
-		rows, err := conn.Query(ctx, fmt.Sprintf("SELECT * FROM %s", tableName))
+		quoted := utils.QuoteIdent(tableName)
+		rows, err := conn.Query(ctx, fmt.Sprintf("SELECT * FROM %s", quoted))
 		if err != nil {
 			slog.Error("snapshot query failed", "table", tableName, "err", err)
 			continue
@@ -220,10 +222,15 @@ func (p *PostgresSource) ensurePublication(ctx context.Context, conn *pgx.Conn) 
 
 // buildCreatePublicationSQL builds the CREATE PUBLICATION statement.
 func (p *PostgresSource) buildCreatePublicationSQL(pubName string) string {
+	quotedPub := utils.QuoteIdent(pubName)
 	if len(p.cfg.Tables) == 0 {
-		return fmt.Sprintf("CREATE PUBLICATION %s FOR ALL TABLES", pubName)
+		return fmt.Sprintf("CREATE PUBLICATION %s FOR ALL TABLES", quotedPub)
 	}
-	return fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s", pubName, strings.Join(p.cfg.Tables, ", "))
+	quoted := make([]string, len(p.cfg.Tables))
+	for i, t := range p.cfg.Tables {
+		quoted[i] = utils.QuoteIdent(t)
+	}
+	return fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s", quotedPub, strings.Join(quoted, ", "))
 }
 
 // connectAndStartReplication opens a replication connection and launches the read loop.
