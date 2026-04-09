@@ -101,18 +101,43 @@ func (s *RESTSource) poll() ([]*models.Event, error) {
 		return nil, err
 	}
 
+	topic := s.cfg.Topic
+	if topic == "" {
+		topic = "cdc"
+	}
+
 	events := make([]*models.Event, 0, len(items))
 	now := time.Now().UnixMilli()
 	for _, item := range items {
-		events = append(events, &models.Event{
-			Op:         constant.CreateAction.String(),
-			InstanceID: s.cfg.InstanceID,
-			Database:   "api",
-			Table:      s.cfg.Name,
-			After:      item,
-			Timestamp:  now,
-			Topic:      s.cfg.Topic,
-		})
+		payload := models.DebeziumPayload{
+			Op:    "c", // Assume create for polling
+			After: item,
+			Source: models.SourceMetadata{
+				Version:   "1.0",
+				Connector: "rest",
+				Name:      s.cfg.InstanceID,
+				TsMs:      now,
+				Snapshot:  "false",
+				DB:        "api",
+				Schema:    "public",
+				Table:     s.cfg.Name,
+			},
+			TimestampMS: now,
+		}
+		data, _ := json.Marshal(payload)
+
+		subject := fmt.Sprintf("%s.%s.%s.%s", topic, s.cfg.InstanceID, "public", s.cfg.Name)
+		events = append(events, models.NewEvent(
+			topic,
+			subject,
+			s.cfg.InstanceID,
+			"public",
+			s.cfg.Name,
+			"c",
+			uint64(now), // Mock LSN
+			fmt.Sprintf("%d", now),
+			data,
+		))
 	}
 	return events, nil
 }

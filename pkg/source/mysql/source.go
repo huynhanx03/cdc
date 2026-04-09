@@ -188,25 +188,21 @@ type eventHandler struct {
 }
 
 func (h *eventHandler) OnRow(e *canal.RowsEvent) error {
-	action := constant.CreateAction.String()
-	switch e.Action {
-	case canal.UpdateAction:
-		action = constant.UpdateAction.String()
-	case canal.DeleteAction:
-		action = constant.DeleteAction.String()
-	}
-
 	for i := 0; i < len(e.Rows); {
 		var before, after json.RawMessage
 
+		dzOp := "u"
 		switch e.Action {
 		case canal.InsertAction:
+			dzOp = "c"
 			after = h.rowToJSON(e, e.Rows[i])
 			i++
 		case canal.DeleteAction:
+			dzOp = "d"
 			before = h.rowToJSON(e, e.Rows[i])
 			i++
 		case canal.UpdateAction:
+			dzOp = "u"
 			// Update comes in pairs: Old, New
 			if i+1 < len(e.Rows) {
 				before = h.rowToJSON(e, e.Rows[i])
@@ -222,20 +218,41 @@ func (h *eventHandler) OnRow(e *canal.RowsEvent) error {
 		pos := h.source.canal.SyncedPosition()
 		offset := fmt.Sprintf("%s:%d", pos.Name, pos.Pos)
 
+		payload := models.DebeziumPayload{
+			Op:     dzOp,
+			Before: before,
+			After:  after,
+			Source: models.SourceMetadata{
+				Version:   "1.0",
+				Connector: "mysql",
+				Name:      h.source.cfg.InstanceID,
+				TsMs:      time.Now().UnixMilli(),
+				Snapshot:  "false",
+				DB:        e.Table.Schema,
+				Schema:    e.Table.Schema,
+				Table:     e.Table.Name,
+				LSN:       lsn,
+			},
+			TimestampMS: time.Now().UnixMilli(),
+		}
+		data, _ := json.Marshal(payload)
+
 		topic := h.source.cfg.Topic
 		if topic == "" {
 			topic = "cdc"
 		}
+
+		subject := fmt.Sprintf("%s.%s.%s.%s", topic, h.source.cfg.InstanceID, e.Table.Schema, e.Table.Name)
 		h.source.pipeline <- models.NewEvent(
 			topic,
-			action,
+			subject,
 			h.source.cfg.InstanceID,
 			e.Table.Schema,
 			e.Table.Name,
-			before,
-			after,
+			dzOp,
 			lsn,
 			offset,
+			data,
 		)
 	}
 

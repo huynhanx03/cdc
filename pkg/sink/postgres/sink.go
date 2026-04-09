@@ -80,15 +80,23 @@ func (s *PostgresSink) WriteBatch(events []*models.Event) error {
 	defer tx.Rollback(ctx)
 
 	for _, event := range events {
-		docMap := event.After
-		if event.Op == constant.DeleteAction.String() {
-			docMap = event.Before
+		var payload models.DebeziumPayload
+		if err := json.Unmarshal(event.Data, &payload); err != nil {
+			slog.Error("failed to unmarshal Debezium payload in Postgres sink", "err", err)
+			continue
+		}
+
+		docMap := payload.After
+		if payload.Op == "d" {
+			docMap = payload.Before
 		}
 		if len(docMap) == 0 {
 			continue
 		}
 
 		// Apply field mapping if configured
+		// Note: ApplyFieldMapping historically took json.RawMessage and returned json.RawMessage
+		// Since docMap is already json.RawMessage, this stays the same.
 		mappedDoc, err := s.cfg.ApplyFieldMapping(docMap)
 		if err != nil {
 			return fmt.Errorf("field mapping failed: %w", err)
@@ -106,7 +114,7 @@ func (s *PostgresSink) WriteBatch(events []*models.Event) error {
 		}
 
 		pkValue, ok := data[pk]
-		if !ok && event.Op != constant.CreateAction.String() {
+		if !ok && payload.Op != "c" {
 			return fmt.Errorf("primary key %q not found in data for table %q", pk, tableName)
 		}
 
@@ -115,18 +123,18 @@ func (s *PostgresSink) WriteBatch(events []*models.Event) error {
 			return fmt.Errorf("failed to ensure table %s: %w", tableName, err)
 		}
 
-		switch event.Op {
-		case constant.DeleteAction.String():
+		switch payload.Op {
+		case "d":
 			query := fmt.Sprintf("DELETE FROM %s WHERE %s = $1", tableName, pk)
 			if _, err := tx.Exec(ctx, query, pkValue); err != nil {
 				return fmt.Errorf("delete failed: %w", err)
 			}
-		case constant.CreateAction.String(), constant.UpdateAction.String(), constant.SnapshotAction.String():
+		case "c", "u", "r":
 			if err := s.upsertTx(ctx, tx, tableName, pk, data); err != nil {
 				return fmt.Errorf("upsert failed: %w", err)
 			}
 		default:
-			slog.Warn("unknown operation type", "op", event.Op)
+			slog.Warn("unknown operation type", "op", payload.Op)
 		}
 	}
 

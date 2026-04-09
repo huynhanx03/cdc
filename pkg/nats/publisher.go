@@ -68,13 +68,24 @@ func (c *Client) PublishBatch(ctx context.Context, subjectFunc func(*models.Even
 
 // toNatsMsg transforms an internal Event model to a nats.Msg with CDC-specific headers.
 func (c *Client) toNatsMsg(subject string, event *models.Event) (*nats.Msg, error) {
-	data, err := json.Marshal(event)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal event: %w", err)
+	var data []byte
+	var err error
+
+	if len(event.Data) > 0 {
+		data = event.Data
+	} else {
+		data, err = json.Marshal(event)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal event: %w", err)
+		}
 	}
 
 	headers := make(nats.Header)
 	headers.Set(constant.HeaderInstanceID, event.InstanceID)
+	// Metadata for zero-unmarshal routing
+	headers.Set(constant.HeaderSchema, event.Schema)
+	headers.Set(constant.HeaderTable, event.Table)
+	headers.Set(constant.HeaderOp, event.Op)
 
 	if event.LSN > 0 {
 		headers.Set(constant.HeaderLSN, strconv.FormatUint(event.LSN, 10))
@@ -83,7 +94,6 @@ func (c *Client) toNatsMsg(subject string, event *models.Event) (*nats.Msg, erro
 	// Critical for Exactly-Once delivery: Nats-Msg-Id
 	if event.Offset != "" {
 		headers.Set(constant.HeaderOffset, event.Offset)
-		// Using InstanceID + Offset ensures that retrying the same record won't create duplicates in NATS
 		headers.Set("Nats-Msg-Id", fmt.Sprintf("%s-%s", event.InstanceID, event.Offset))
 	}
 

@@ -1,6 +1,8 @@
 package utils
 
-import "strings"
+import (
+	"strings"
+)
 
 // QuoteIdent quotes a SQL identifier with double-quotes.
 func QuoteIdent(name string) string {
@@ -28,4 +30,14 @@ func quoteIdentPart(s string) string {
 // quoteBacktick wraps a single identifier in backticks.
 func quoteBacktick(s string) string {
 	return "`" + strings.ReplaceAll(s, "`", "``") + "`"
+}
+
+// SplitTableIdent separates a full string into schema and table name.
+func SplitTableIdent(s string) (string, string) {
+	parts := strings.SplitN(s, ".", 2)
+	if len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	// Defaults to "public" schema if not specified
+	return "public", s
 }

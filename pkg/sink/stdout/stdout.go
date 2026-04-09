@@ -2,7 +2,6 @@ package stdout
 
 import (
 	"encoding/json"
-	"fmt"
 	"log/slog"
 
 	"github.com/foden/cdc/pkg/config"
@@ -40,16 +39,19 @@ func (s *StdoutSink) Write(event *models.Event) error {
 // WriteBatch prints multiple events to stdout.
 func (s *StdoutSink) WriteBatch(events []*models.Event) error {
 	for _, event := range events {
-		b, err := json.MarshalIndent(event, "", "  ")
-		if err != nil {
-			return fmt.Errorf("failed to encode event: %w", err)
+		var payload models.DebeziumPayload
+		if err := json.Unmarshal(event.Data, &payload); err != nil {
+			slog.Warn("failed to unmarshal Debezium payload for logging", "err", err)
 		}
+
 		slog.Info("event captured",
 			"instance", event.InstanceID,
-			"op", event.Op,
-			"db", event.Database,
+			"op", payload.Op,
+			"schema", event.Schema,
 			"table", event.Table,
-			"payload", string(b),
+			"lsn", event.LSN,
+			"offset", event.Offset,
+			"data_size", len(event.Data),
 		)
 	}
 	return nil

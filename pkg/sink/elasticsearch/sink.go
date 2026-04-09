@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bytedance/sonic"
+	"github.com/bytedance/sonic/ast"
 	"github.com/elastic/go-elasticsearch/v9"
 	"github.com/elastic/go-elasticsearch/v9/esapi"
 
@@ -40,7 +42,7 @@ type ElasticSink struct {
 	done        chan struct{}
 }
 
-// Bulk Response Parsing
+// Internal structures for parsing Bulk API responses
 type bulkResponse struct {
 	Errors bool                        `json:"errors"`
 	Items  []map[string]bulkItemResult `json:"items"`
@@ -58,7 +60,7 @@ type bulkItemError struct {
 	Reason string `json:"reason"`
 }
 
-// New creates an ElasticSink — validates the connection on startup.
+// New creates an ElasticSink and verifies connection.
 func New(cfg *config.SinkConfig) (*ElasticSink, error) {
 	client, err := newClient(cfg)
 	if err != nil {
@@ -76,38 +78,44 @@ func New(cfg *config.SinkConfig) (*ElasticSink, error) {
 	return s, nil
 }
 
-// Write buffers a single CDC event. Auto-flushes when batch_size is reached.
+// Write buffers a single event.
 func (s *ElasticSink) Write(event *models.Event) error {
 	return s.WriteBatch([]*models.Event{event})
 }
 
-// WriteBatch buffers multiple CDC events. Auto-flushes when batch_size is reached.
+// WriteBatch processes events using high-performance AST manipulation to ensure mapping compatibility.
 func (s *ElasticSink) WriteBatch(events []*models.Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	for _, event := range events {
-		docMap := event.After
-		if event.Op == constant.DeleteAction.String() {
-			docMap = event.Before
+		var node ast.Node
+		var err error
+
+		// Extract the relevant payload (Debezium 'before' for delete, 'after' for others)
+		if event.Op == "d" {
+			node, err = sonic.Get(event.Data, "before")
+		} else {
+			node, err = sonic.Get(event.Data, "after")
 		}
-		if len(docMap) == 0 {
+
+		if err != nil || !node.Exists() {
 			continue
 		}
 
-		index := s.indexName(event.InstanceID, event.Table)
-		docID := extractID(docMap)
+		// Apply all transformations: Metadata to String, Time to Epoch
+		s.sanitizeNode(&node)
 
-		if event.Op == constant.DeleteAction.String() {
+		// 2. Render sanitized JSON back to raw bytes
+		docBytes, _ := node.MarshalJSON()
+
+		index := s.indexName(event.InstanceID, event.Table)
+		docID := extractIDFast(docBytes)
+
+		if event.Op == "d" {
 			s.writeDeleteAction(index, docID)
 		} else {
-			mappedDoc, err := s.cfg.ApplyFieldMapping(docMap)
-			if err != nil {
-				slog.Warn("field mapping application failed", "err", err, "index", index, "id", docID)
-				s.writeIndexAction(index, docID, docMap) // write original
-			} else {
-				s.writeIndexAction(index, docID, mappedDoc)
-			}
+			s.writeIndexAction(index, docID, docBytes)
 		}
 		s.pending++
 	}
@@ -118,7 +126,6 @@ func (s *ElasticSink) WriteBatch(events []*models.Event) error {
 	return nil
 }
 
-// Flush sends accumulated bulk buffer to Elasticsearch.
 func (s *ElasticSink) Flush() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -130,84 +137,65 @@ func (s *ElasticSink) flushLocked() error {
 		return nil
 	}
 
-	data := make([]byte, s.buf.Len())
-	copy(data, s.buf.Bytes())
+	data := s.buf.Bytes()
 	count := s.pending
-
-	s.buf.Reset()
-	s.pending = 0
-
-	maxRetries := s.cfg.MaxRetries
-	retryBaseMs := s.cfg.RetryBaseMs
 
 	var res *esapi.Response
 	var err error
 
-	for attempt := 0; attempt <= int(maxRetries); attempt++ {
+	// Execute Bulk Request with Exponential Backoff
+	for attempt := 0; attempt <= int(s.cfg.MaxRetries); attempt++ {
 		req := esapi.BulkRequest{Body: bytes.NewReader(data)}
 		res, err = req.Do(context.Background(), s.client)
 
 		if err == nil && !res.IsError() {
-			break // Success
+			break
 		}
 
-		if res != nil {
-			// Extract error body if possible for logging
-			if res.IsError() && res.Body != nil {
-				body, _ := io.ReadAll(res.Body)
-				slog.Error("bulk request error", "status", res.StatusCode, "body", string(body))
-			}
-			if res.Body != nil {
-				res.Body.Close()
-			}
+		if res != nil && res.IsError() && res.Body != nil {
+			body, _ := io.ReadAll(res.Body)
+			slog.Error("Bulk Request Failed", "status", res.StatusCode, "body", string(body))
+			res.Body.Close()
 		}
 
-		if attempt < int(maxRetries) {
-			delay := time.Duration(retryBaseMs*(1<<attempt)) * time.Millisecond
-			slog.Warn("bulk request failed, retrying", "attempt", attempt+1, "delay", delay, "err", err)
+		if attempt < int(s.cfg.MaxRetries) {
+			delay := time.Duration(s.cfg.RetryBaseMs*(1<<attempt)) * time.Millisecond
 			time.Sleep(delay)
 		}
 	}
 
+	// Reset buffer after attempt
+	s.buf.Reset()
+	s.pending = 0
+
 	if err != nil {
-		slog.Error("bulk request failed after retries", "err", err, "count", count)
-		return fmt.Errorf("bulk request failed: %w", err)
+		return fmt.Errorf("bulk request failed after retries: %w", err)
 	}
 	defer res.Body.Close()
 
-	if res.IsError() {
-		return fmt.Errorf("bulk response error [%d]", res.StatusCode)
-	}
-
-	// Read response body safely after successful request
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read bulk response body: %w", err)
-	}
-
-	// Check for item-level errors inside the bulk response
+	// Parse item-level errors
+	respBody, _ := io.ReadAll(res.Body)
 	var bulkRes bulkResponse
-	if err := json.Unmarshal(body, &bulkRes); err == nil && bulkRes.Errors {
+	if err := json.Unmarshal(respBody, &bulkRes); err == nil && bulkRes.Errors {
 		for _, item := range bulkRes.Items {
 			for action, result := range item {
 				if result.Error != nil {
-					slog.Error("bulk item error",
+					slog.Error("Bulk Item Error",
 						"action", action,
-						"index", result.Index,
 						"id", result.ID,
-						"type", result.Error.Type,
 						"reason", result.Error.Reason,
-					)
+						"type", result.Error.Type)
 				}
 			}
 		}
+		return fmt.Errorf("bulk response contained errors")
 	}
 
-	slog.Info("bulk flush completed", "count", count)
+	slog.Debug("bulk flush completed", "count", count)
 	return nil
 }
 
-// flushLoop runs a background goroutine that flushes on a timer.
+// flushLoop runs a background goroutine that flushes the buffer periodically.
 func (s *ElasticSink) flushLoop() {
 	for {
 		select {
@@ -221,7 +209,7 @@ func (s *ElasticSink) flushLoop() {
 	}
 }
 
-// Close flushes remaining events and stops the background flusher.
+// Close closes the sink.
 func (s *ElasticSink) Close() error {
 	slog.Info("closing elasticsearch sink")
 	s.flushTicker.Stop()
@@ -229,30 +217,27 @@ func (s *ElasticSink) Close() error {
 	return s.Flush()
 }
 
-// Type returns the sink type name.
+// Type returns the type of the sink.
 func (s *ElasticSink) Type() string {
 	return constant.SinkTypeElasticsearch.String()
 }
 
-// Topic returns the NATS topic pattern this sink subscribes to
+// InstanceID returns the instance ID of the sink.
+func (s *ElasticSink) InstanceID() string {
+	return s.cfg.InstanceID
+}
+
+// MaxRetries returns the maximum number of retries.
+func (s *ElasticSink) MaxRetries() int32 {
+	return s.cfg.MaxRetries
+}
+
+// Topic returns the topic to subscribe to.
 func (s *ElasticSink) Topic() string {
 	if s.cfg.Topic != "" {
 		return s.cfg.Topic
 	}
 	return "cdc.>"
-}
-
-// InstanceID returns the unique identifier for this sink.
-func (s *ElasticSink) InstanceID() string {
-	return s.cfg.InstanceID
-}
-
-// MaxRetries returns the maximum number of delivery attempts.
-func (s *ElasticSink) MaxRetries() int32 {
-	if s.cfg.MaxRetries <= 0 {
-		return 3 // Default
-	}
-	return s.cfg.MaxRetries
 }
 
 // newClient builds and pings the ES client.
@@ -268,32 +253,24 @@ func newClient(cfg *config.SinkConfig) (*elasticsearch.Client, error) {
 
 	client, err := elasticsearch.NewClient(esCfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create elasticsearch client: %w", err)
+		return nil, err
 	}
 
 	res, err := client.Info()
 	if err != nil {
-		return nil, fmt.Errorf("failed to ping elasticsearch: %w", err)
+		return nil, err
 	}
-	defer res.Body.Close()
+	res.Body.Close()
 
-	if res.IsError() {
-		return nil, fmt.Errorf("elasticsearch error: %s", res.String())
-	}
-
-	slog.Info("elasticsearch sink connected", "addresses", cfg.URL)
 	return client, nil
 }
 
 // indexName builds the target index/alias name from prefix + instance + table.
-// Dots are replaced with underscores (e.g. "public.user_files" → "cdc_public_user_files").
 func (s *ElasticSink) indexName(instanceID, table string) string {
 	if s.cfg.IndexMapping != nil {
-		// 1. Try instance-specific mapping "inst1.public.users"
 		if idx, ok := s.cfg.IndexMapping[fmt.Sprintf("%s.%s", instanceID, table)]; ok {
 			return idx
 		}
-		// 2. Try table-only mapping "public.users"
 		if idx, ok := s.cfg.IndexMapping[table]; ok {
 			return idx
 		}
@@ -304,19 +281,39 @@ func (s *ElasticSink) indexName(instanceID, table string) string {
 	}
 
 	safeTable := strings.ReplaceAll(table, ".", "_")
-	if instanceID != "" && instanceID != "default" {
-		return fmt.Sprintf("%s%s_%s", s.cfg.IndexPrefix, instanceID, safeTable)
-	}
-	return fmt.Sprintf("%s%s", s.cfg.IndexPrefix, safeTable)
+	return fmt.Sprintf("%s%s_%s", s.cfg.IndexPrefix, instanceID, safeTable)
 }
 
-// extractID tries to pull a document ID from the raw JSON payload quickly.
-func extractID(doc json.RawMessage) string {
-	var partial struct {
-		ID interface{} `json:"id"`
-	}
-	if err := json.Unmarshal(doc, &partial); err == nil && partial.ID != nil {
-		return fmt.Sprintf("%v", partial.ID)
+// extractIDFast tries to pull a document ID from the raw JSON payload quickly using sonic.Get.
+func extractIDFast(doc []byte) string {
+	// Candidate keys for primary identifiers
+	for _, k := range []string{"id", "ID", "uuid", "uid", "guid"} {
+		if node, err := sonic.Get(doc, k); err == nil {
+			switch node.TypeSafe() {
+			case ast.V_ARRAY: // Handle UUIDs sent as raw byte arrays
+				l, _ := node.Len()
+				if l == 16 {
+					b := make([]byte, 16)
+					for i := 0; i < 16; i++ {
+						v, _ := node.Index(i).Int64()
+						b[i] = byte(v)
+					}
+					return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+				}
+				var b []byte
+				for i := 0; i < l; i++ {
+					v, _ := node.Index(i).Int64()
+					b = append(b, byte(v))
+				}
+				return fmt.Sprintf("%x", b)
+			case ast.V_STRING:
+				val, _ := node.String()
+				return val
+			default:
+				val, _ := node.Raw()
+				return strings.Trim(val, "\"")
+			}
+		}
 	}
 	return ""
 }
@@ -324,22 +321,81 @@ func extractID(doc json.RawMessage) string {
 // writeDeleteAction appends a bulk delete line.
 func (s *ElasticSink) writeDeleteAction(index, docID string) {
 	if docID == "" {
-		slog.Warn("delete event without document id, skipping", "index", index)
 		return
 	}
-	meta := fmt.Sprintf(`{"delete":{"_index":"%s","_id":"%s"}}`, index, docID)
-	s.buf.WriteString(meta)
+	s.buf.WriteString(fmt.Sprintf(`{"delete":{"_index":"%s","_id":"%s"}}`, index, docID))
 	s.buf.WriteByte('\n')
 }
 
 // writeIndexAction appends a bulk index (upsert) line.
-func (s *ElasticSink) writeIndexAction(index, docID string, doc json.RawMessage) {
+func (s *ElasticSink) writeIndexAction(index, docID string, doc interface{}) {
 	if docID != "" {
 		s.buf.WriteString(fmt.Sprintf(`{"index":{"_index":"%s","_id":"%s"}}`, index, docID))
 	} else {
 		s.buf.WriteString(fmt.Sprintf(`{"index":{"_index":"%s"}}`, index))
 	}
 	s.buf.WriteByte('\n')
-	s.buf.Write(doc)
+
+	switch v := doc.(type) {
+	case []byte:
+		s.buf.Write(v)
+	default:
+		b, _ := sonic.Marshal(v)
+		s.buf.Write(b)
+	}
 	s.buf.WriteByte('\n')
+}
+
+// Helper to parse various Postgres time formats
+func parseFlexTime(val string) (time.Time, error) {
+	layouts := []string{
+		"2006-01-02 15:04:05.999999-07",
+		"2006-01-02 15:04:05.999999+00",
+		"2006-01-02T15:04:05.999999Z",
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+	}
+
+	var lastErr error
+	for _, layout := range layouts {
+		t, err := time.Parse(layout, val)
+		if err == nil {
+			return t, nil
+		}
+		lastErr = err
+	}
+	return time.Time{}, lastErr
+}
+
+// sanitizeNode cleans up the AST node recursively or by targeting specific patterns.
+func (s *ElasticSink) sanitizeNode(node *ast.Node) {
+	// 1. Fix 'metadata' object to string for keyword mapping compatibility
+	meta := node.Get("metadata")
+	if meta.Exists() && meta.TypeSafe() == ast.V_OBJECT {
+		raw, _ := meta.Raw()
+		if raw == "{}" {
+			_, _ = node.Set("metadata", ast.NewString(""))
+		} else {
+			_, _ = node.Set("metadata", ast.NewString(raw))
+		}
+	}
+
+	// 2. Scan and Convert ALL potential time fields to Epoch Milliseconds
+	// We target fields ending in _at, _time, or specific timestamp keys
+	if obj, err := node.Map(); err == nil {
+		for key, val := range obj {
+			strVal, isStr := val.(string)
+			if !isStr {
+				continue
+			}
+
+			// Optimization: Only check fields that look like timestamps
+			if strings.HasSuffix(key, "_at") || strings.HasSuffix(key, "time") || key == "timestamp" {
+				if t, err := parseFlexTime(strVal); err == nil {
+					// Update the AST node with Epoch Milliseconds
+					_, _ = node.Set(key, ast.NewAny(t.UnixMilli()))
+				}
+			}
+		}
+	}
 }

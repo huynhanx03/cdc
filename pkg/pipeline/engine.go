@@ -2,7 +2,6 @@ package pipeline
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -161,7 +160,7 @@ func (e *Engine) producer() {
 		return fmt.Sprintf("%s.%s.%s.%s",
 			topic,
 			ev.InstanceID,
-			strings.ReplaceAll(ev.Database, ".", "_"),
+			strings.ReplaceAll(ev.Schema, ".", "_"),
 			strings.ReplaceAll(ev.Table, ".", "_"))
 	}
 
@@ -171,27 +170,24 @@ func (e *Engine) producer() {
 			if !ok {
 				// Final flush before exiting
 				if len(batch) > 0 {
-					e.publishBatch(subjectFunc, batch)
+					e.publishBatchWithRetry(subjectFunc, batch)
 				}
 				slog.Debug("pipeline producer exited")
 				return
 			}
 
 			// Pipeline logic: Filter & Transform
-			processedEv := e.applyMiddleware(ev)
-			if processedEv == nil {
-				continue
+			if processedEv := e.applyMiddleware(ev); processedEv != nil {
+				batch = append(batch, processedEv)
 			}
-			batch = append(batch, processedEv)
 			if len(batch) >= e.batchSize {
 				e.publishBatchWithRetry(subjectFunc, batch)
-				batch = batch[:0] // Reset slice nhưng giữ nguyên capacity
+				batch = batch[:0] // Reset slice hold capacity
 			}
-
 
 		case <-flushTicker.C:
 			if len(batch) > 0 {
-				e.publishBatch(subjectFunc, batch)
+				e.publishBatchWithRetry(subjectFunc, batch)
 				batch = batch[:0]
 			}
 		case <-backpressureTicker.C:
@@ -231,7 +227,7 @@ func (e *Engine) publishBatchWithRetry(subjectFunc func(*models.Event) string, b
 			}
 			return
 		}
-		time.Sleep(time.Duration(i+1) * 200 * time.Millisecond) // Exponential backoff nhẹ
+		time.Sleep(time.Duration(i+1) * 100 * time.Millisecond) // Exponential backoff
 	}
 
 	slog.Error("failed to publish batch after retries", _nameErr, err)
@@ -275,6 +271,7 @@ func (e *Engine) worker(ctx context.Context, sink interfaces.Sink, partID int) {
 	// Use a shared consumer group name unique to this sink to allow multiple sink workers
 	// to share load, while different sinks consume independently.
 	consumerName := fmt.Sprintf("pipeline-worker-%s", sink.InstanceID())
+	fmt.Println("sink.Topic()", sink.Topic())
 	consumer, err := e.natsClient.CreateOrUpdateConsumer(ctx, consumerName, []string{sink.Topic()})
 	if err != nil {
 		slog.Error("failed to create NATS consumer", "worker_id", partID, "sink", sink.InstanceID(), _nameErr, err)
@@ -318,20 +315,27 @@ func (e *Engine) worker(ctx context.Context, sink interfaces.Sink, partID int) {
 		}
 
 		for msg := range msgBatch.Messages() {
-			var ev models.Event
-			if err := json.Unmarshal(msg.Data(), &ev); err != nil {
-				slog.Error("failed to unmarshal NATS message", "worker_id", partID, "sink", sink.InstanceID(), _nameErr, err)
-				msg.Term() // Don't retry unmarshalable junk
-				continue
+			// ZERO-UNMARSHAL: extract metadata from headers instead of the raw JSON body
+			headers := msg.Headers()
+			lsn, _ := strconv.ParseUint(headers.Get(constant.HeaderLSN), 10, 64)
+
+			ev := &models.Event{
+				InstanceID: headers.Get(constant.HeaderInstanceID),
+				Offset:     headers.Get(constant.HeaderOffset),
+				LSN:        lsn,
+				Schema:     headers.Get(constant.HeaderSchema),
+				Table:      headers.Get(constant.HeaderTable),
+				Op:         headers.Get(constant.HeaderOp),
+				Data:       msg.Data(), // Pass through raw bytes
 			}
 
 			// Buffer event and message
 			pendingMsgs = append(pendingMsgs, msg)
-			pendingEvents = append(pendingEvents, &ev)
+			pendingEvents = append(pendingEvents, ev)
 		}
 
 		// Flush when batch is full or when Fetch returned (timeout = partial batch flush)
-		if len(pendingMsgs) > 0 && (len(pendingMsgs) >= e.batchSize || msgBatch.Error() != nil) {
+		if len(pendingMsgs) > 0 {
 			metrics.BatchSizeHistogram.WithLabelValues("worker").Observe(float64(len(pendingMsgs)))
 			e.flushAndAck(sink, pendingMsgs, pendingEvents, partID)
 
@@ -342,22 +346,26 @@ func (e *Engine) worker(ctx context.Context, sink interfaces.Sink, partID int) {
 }
 
 func (e *Engine) flushAndAck(sink interfaces.Sink, msgs []jetstream.Msg, events []*models.Event, workerID int) {
+	if len(events) == 0 {
+		return
+	}
+
 	start := time.Now()
 	// Write batch to sink
 	if err := sink.WriteBatch(events); err != nil {
 		e.handleSinkError(sink, msgs, err, workerID)
 		return
 	}
+
 	if err := sink.Flush(); err != nil {
-		for _, m := range msgs {
-			m.Nak()
-		}
+		e.handleSinkError(sink, msgs, err, workerID)
 		return
 	}
 
 	// Update Metrics
 	duration := time.Since(start)
-	metrics.SinkWriteDuration.WithLabelValues(sink.InstanceID(), sink.Type()).Observe(duration.Seconds() / float64(len(events)))
+	avgLat := duration.Seconds() / float64(len(events))
+	metrics.SinkWriteDuration.WithLabelValues(sink.InstanceID(), sink.Type()).Observe(avgLat)
 	e.updateSinkStats(sink.InstanceID(), true, "")
 
 	// Handle Offsets and ACKs
@@ -367,16 +375,15 @@ func (e *Engine) flushAndAck(sink interfaces.Sink, msgs []jetstream.Msg, events 
 	for _, m := range msgs {
 		h := m.Headers()
 		instID := h.Get(constant.HeaderInstanceID)
-		if instID != "" {
-			if off := h.Get(constant.HeaderOffset); off != "" {
-				latestOffsets[instID] = off
-			}
-			if lsnVal := h.Get(constant.HeaderLSN); lsnVal != "" {
-				if lsn, err := strconv.ParseUint(lsnVal, 10, 64); err == nil {
-					if lsn > highestLSNs[instID] {
-						highestLSNs[instID] = lsn
-					}
-				}
+		if instID == "" {
+			continue
+		}
+		if off := h.Get(constant.HeaderOffset); off != "" {
+			latestOffsets[instID] = off
+		}
+		if lsnVal := h.Get(constant.HeaderLSN); lsnVal != "" {
+			if lsn, _ := strconv.ParseUint(lsnVal, 10, 64); lsn > highestLSNs[instID] {
+				highestLSNs[instID] = lsn
 			}
 		}
 		m.Ack()
@@ -384,7 +391,9 @@ func (e *Engine) flushAndAck(sink interfaces.Sink, msgs []jetstream.Msg, events 
 
 	// Save Offset to NATS KV
 	for instID, offset := range latestOffsets {
-		e.natsClient.SaveOffset(context.Background(), instID, offset)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		e.natsClient.SaveOffset(ctx, instID, offset)
+		cancel()
 	}
 
 	// Response to Source channel
@@ -454,6 +463,18 @@ func (e *Engine) Stop() {
 	}
 
 	e.wg.Wait()
+
+	e.mu.Lock()
+	// Close all channel ACK to prevent Source from blocking
+	for id, ch := range e.sourceAckChs {
+		close(ch)
+		delete(e.sourceAckChs, id)
+	}
+	// Clear cancel map
+	for id := range e.sinkCancels {
+		delete(e.sinkCancels, id)
+	}
+	e.mu.Unlock()
 
 	for _, s := range e.sinks {
 		if err := s.Close(); err != nil {

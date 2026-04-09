@@ -7,29 +7,53 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/jackc/pglogrepl"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgproto3"
-
+	"github.com/bytedance/sonic"
 	"github.com/foden/cdc/pkg/config"
 	"github.com/foden/cdc/pkg/constant"
 	"github.com/foden/cdc/pkg/interfaces"
 	"github.com/foden/cdc/pkg/models"
 	"github.com/foden/cdc/pkg/registry"
 	"github.com/foden/cdc/pkg/utils"
+	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgproto3"
 )
 
 const (
-	_outputPlugin    = "pgoutput"
-	_protoVersion    = "1"
-	_standbyInterval = 10 * time.Second
-	_walLevelLogical = "logical"
-	_snapshotAction  = "NOEXPORT_SNAPSHOT"
+	_outputPlugin        = "pgoutput"
+	_protoVersion        = "1"
+	_standbyInterval     = 10 * time.Second
+	_walLevelLogical     = "logical"
+	_snapshotAction      = "NOEXPORT_SNAPSHOT"
+	_defaultBackoff      = 30 * time.Second
+	_defaultResetBackoff = 1 * time.Second
 )
+
+// Internal representation of a row change before JSON encoding
+type walTask struct {
+	op        string
+	namespace string
+	table     string
+	rel       *pglogrepl.RelationMessage // For WAL
+	data      map[string]interface{}     // Pre-processed data (for snapshots)
+	old       []*pglogrepl.TupleDataColumn
+	new       []*pglogrepl.TupleDataColumn
+	lsn       uint64
+	ts        int64
+}
+
+// Pool for reusing column slices to reduce GC pressure
+var columnPool = sync.Pool{
+	New: func() interface{} {
+		// Pre-allocate space for 32 columns which covers most tables
+		return make(map[string]interface{}, 32)
+	},
+}
 
 func init() {
 	registry.RegisterSource(constant.SourceTypePostgres.String(), func(cfg *config.SourceConfig) (interfaces.Source, error) {
@@ -37,7 +61,6 @@ func init() {
 	})
 }
 
-// PostgresSource streams CDC events via PostgreSQL logical replication.
 type PostgresSource struct {
 	cfg        *config.SourceConfig
 	conn       *pgconn.PgConn
@@ -45,366 +68,180 @@ type PostgresSource struct {
 	tableMap   map[string]bool
 	pipeline   chan<- *models.Event
 	flushedLSN uint64
+
+	// Metadata protection
+	relMu     sync.RWMutex
+	relations map[uint32]*pglogrepl.RelationMessage
+
+	// Single channel for Strict Global Ordering
+	taskChan chan *walTask
+	wg       sync.WaitGroup
 }
 
-// New creates a PostgresSource. Connection is deferred to Start().
 func New(cfg *config.SourceConfig) (*PostgresSource, error) {
 	tm := make(map[string]bool, len(cfg.Tables))
 	for _, t := range cfg.Tables {
 		tm[t] = true
 	}
 	return &PostgresSource{
-		cfg:      cfg,
-		stop:     make(chan struct{}),
-		tableMap: tm,
+		cfg:       cfg,
+		stop:      make(chan struct{}),
+		tableMap:  tm,
+		relations: make(map[uint32]*pglogrepl.RelationMessage),
+		// Larger buffer to absorb bursts while maintaining sequence
+		taskChan: make(chan *walTask, 8192),
 	}, nil
 }
 
-// Start performs auto-setup, connects via replication protocol, and streams events.
-func (p *PostgresSource) Start(pipeline chan<- *models.Event, ackCh <-chan uint64, initialOffset string) error {
-	p.pipeline = pipeline
-
-	if err := p.ensureSetup(); err != nil {
-		return fmt.Errorf("postgres setup failed: %w", err)
-	}
-
-	startLSN := uint64(0)
-	if initialOffset != "" {
-		if l, err := strconv.ParseUint(initialOffset, 10, 64); err == nil {
-			startLSN = l
-		}
-	}
-
-	if p.shouldSnapshot(initialOffset) {
-		if err := p.runSnapshot(context.Background()); err != nil {
-			return fmt.Errorf("snapshot failed: %w", err)
-		}
-	}
-
-	return p.connectAndStartReplication(ackCh, pglogrepl.LSN(startLSN))
-}
-
-func (p *PostgresSource) shouldSnapshot(offset string) bool {
-	mode := strings.ToLower(p.cfg.SnapshotMode)
-	if mode == "always" {
-		return true
-	}
-	if mode == "initial" && offset == "" {
-		return true
-	}
-	return false
-}
-
-func (p *PostgresSource) runSnapshot(ctx context.Context) error {
-	slog.Info("starting snapshot", "instance", p.cfg.InstanceID, "tables", p.cfg.Tables)
-
-	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s",
-		p.cfg.Username, p.cfg.Password, p.cfg.Host, p.cfg.Port, p.cfg.Database)
-	conn, err := pgx.Connect(ctx, connStr)
-	if err != nil {
-		return err
-	}
-	defer conn.Close(ctx)
-
-	for _, tableName := range p.cfg.Tables {
-		// Use a transaction and cursor for chunked fetching to prevent OOM on large tables
-		tx, err := conn.Begin(ctx)
-		if err != nil {
-			slog.Error("failed to start snapshot transaction", "table", tableName, "err", err)
-			continue
-		}
-
-		quoted := utils.QuoteIdent(tableName)
-		cursorName := "cdc_snapshot_cursor"
-		_, err = tx.Exec(ctx, fmt.Sprintf("DECLARE %s CURSOR FOR SELECT * FROM %s", cursorName, quoted))
-		if err != nil {
-			slog.Error("failed to declare snapshot cursor", "table", tableName, "err", err)
-			tx.Rollback(ctx)
-			continue
-		}
-
-		schema := "public"
-		table := tableName
-		if strings.Contains(tableName, ".") {
-			parts := strings.SplitN(tableName, ".", 2)
-			schema = parts[0]
-			table = parts[1]
-		}
-
-		totalCount := 0
-		for {
-			rows, err := tx.Query(ctx, fmt.Sprintf("FETCH 1000 FROM %s", cursorName))
-			if err != nil {
-				slog.Error("snapshot fetch failed", "table", tableName, "err", err)
-				break
-			}
-
-			fields := rows.FieldDescriptions()
-			count := 0
-			for rows.Next() {
-				vals, err := rows.Values()
-				if err != nil {
-					slog.Error("read snapshot row failed", "table", tableName, "err", err)
-					continue
-				}
-
-				obj := make(map[string]interface{})
-				for i, field := range fields {
-					obj[field.Name] = vals[i]
-				}
-				after, _ := json.Marshal(obj)
-
-				topic := p.cfg.Topic
-				if topic == "" {
-					topic = "cdc"
-				}
-				p.pipeline <- models.NewEvent(topic, constant.SnapshotAction.String(), p.cfg.InstanceID, schema, table, nil, after, 0, "snapshot")
-				count++
-				totalCount++
-			}
-			rows.Close()
-
-			if count == 0 {
-				break // End of table
-			}
-			slog.Debug("snapshot chunk processed", "table", tableName, "count", totalCount)
-		}
-
-		tx.Commit(ctx)
-		slog.Info("snapshot table completed", "table", tableName, "rows", totalCount)
-	}
-	slog.Info("snapshot process finished")
-	return nil
-}
-
-// Stop gracefully stops the replication stream and closes the connection.
-func (p *PostgresSource) Stop() error {
-	slog.Info("stopping postgres source")
-	close(p.stop)
-	if p.conn != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return p.conn.Close(ctx)
-	}
-	return nil
-}
-
+// InstanceID returns the unique identifier for this source instance.
 func (p *PostgresSource) InstanceID() string {
 	return p.cfg.InstanceID
 }
 
-// ensureSetup validates wal_level and auto-creates publication if missing.
-func (p *PostgresSource) ensureSetup() error {
-	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s",
-		p.cfg.Username, p.cfg.Password, p.cfg.Host, p.cfg.Port, p.cfg.Database)
+func (p *PostgresSource) Start(pipeline chan<- *models.Event, ackCh <-chan uint64, initialOffset string) error {
+	p.pipeline = pipeline
 
-	ctx := context.Background()
-	conn, err := pgx.Connect(ctx, connStr)
-	if err != nil {
-		return fmt.Errorf("setup connection failed: %w", err)
-	}
-	defer conn.Close(ctx)
-
-	if err := p.checkWalLevel(ctx, conn); err != nil {
+	if err := p.ensureSetup(); err != nil {
 		return err
 	}
-	return p.ensurePublication(ctx, conn)
+
+	// Start exactly ONE worker to guarantee 100% global order
+	p.wg.Add(1)
+	go p.singleOrderedWorker()
+
+	startLSN := uint64(0)
+	if initialOffset != "" {
+		startLSN, _ = strconv.ParseUint(initialOffset, 10, 64)
+	}
+
+	// Re-enable snapshot if required
+	if p.shouldSnapshot(initialOffset) {
+		if err := p.runSnapshot(context.Background()); err != nil {
+			slog.Error("Initial snapshot failed", "err", err)
+			return fmt.Errorf("snapshot failed: %w", err)
+		}
+	}
+
+	go p.ackLoop(ackCh)
+	return p.connectAndStartReplication(pglogrepl.LSN(startLSN))
 }
 
-// checkWalLevel verifies wal_level = logical.
-func (p *PostgresSource) checkWalLevel(ctx context.Context, conn *pgx.Conn) error {
-	var walLevel string
-	if err := conn.QueryRow(ctx, "SHOW wal_level").Scan(&walLevel); err != nil {
-		return fmt.Errorf("failed to check wal_level: %w", err)
+func (p *PostgresSource) processTask(t *walTask) {
+	var before, after []byte
+	var namespace, table string
+
+	if t.op == "r" {
+		// Snapshot row
+		namespace = t.namespace
+		table = t.table
+		after, _ = sonic.Marshal(t.data)
+	} else {
+		// WAL row
+		namespace = t.rel.Namespace
+		table = t.rel.RelationName
+		before = p.decodeToJSONRaw(t.rel, t.old)
+		after = p.decodeToJSONRaw(t.rel, t.new)
 	}
-	if walLevel != _walLevelLogical {
-		return fmt.Errorf("wal_level is '%s', must be '%s' — change postgresql.conf and restart", walLevel, _walLevelLogical)
+
+	// 2. Build Debezium-style payload
+	payload := models.DebeziumPayload{
+		Op:     t.op,
+		Before: json.RawMessage(before),
+		After:  json.RawMessage(after),
+		Source: models.SourceMetadata{
+			Version:   "1.0",
+			Connector: "postgresql",
+			Name:      p.cfg.InstanceID,
+			TsMs:      t.ts,
+			Snapshot:  strconv.FormatBool(t.op == "r"),
+			DB:        p.cfg.Database,
+			Schema:    namespace,
+			Table:     table,
+			LSN:       t.lsn,
+		},
+		TimestampMS: time.Now().UnixMilli(),
 	}
-	slog.Info("wal_level check passed", "wal_level", walLevel)
-	return nil
+
+	// 3. Fast JSON Marshal
+	data, _ := sonic.Marshal(payload)
+
+	topic := p.cfg.Topic
+	if topic == "" {
+		topic = "cdc"
+	}
+
+	subject := fmt.Sprintf("%s.%s.%s.%s", topic, p.cfg.InstanceID, namespace, table)
+	p.pipeline <- models.NewEvent(topic, subject, p.cfg.InstanceID, namespace, table, t.op, t.lsn, strconv.FormatUint(t.lsn, 10), data)
 }
 
-// ensurePublication creates the publication if it doesn't exist.
-func (p *PostgresSource) ensurePublication(ctx context.Context, conn *pgx.Conn) error {
-	pubName := p.cfg.PublicationName
-
-	var exists bool
-	if err := conn.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM pg_publication WHERE pubname = $1)", pubName).Scan(&exists); err != nil {
-		return fmt.Errorf("failed to check publication: %w", err)
-	}
-
-	if exists {
-		slog.Info("publication already exists", "publication", pubName)
+// decodeToJSONRaw converts raw WAL bytes to a format that json.Marshal understands
+func (p *PostgresSource) decodeToJSONRaw(rel *pglogrepl.RelationMessage, cols []*pglogrepl.TupleDataColumn) json.RawMessage {
+	if cols == nil {
 		return nil
 	}
 
-	sql := p.buildCreatePublicationSQL(pubName)
-	if _, err := conn.Exec(ctx, sql); err != nil {
-		return fmt.Errorf("failed to create publication: %w", err)
+	// Reuse map from pool to avoid allocation
+	obj := columnPool.Get().(map[string]interface{})
+	defer func() {
+		// Clean the map before putting it back
+		for k := range obj {
+			delete(obj, k)
+		}
+		columnPool.Put(obj)
+	}()
+
+	for i, col := range cols {
+		if i >= len(rel.Columns) || col.DataType == 'u' {
+			continue // Skip unchanged TOAST or overflow
+		}
+
+		name := rel.Columns[i].Name
+		oid := rel.Columns[i].DataType
+
+		switch col.DataType {
+		case 'n': // Null
+			obj[name] = nil
+		case 't': // Text formatted value
+			obj[name] = p.parseOid(string(col.Data), oid)
+		}
 	}
-	slog.Info("publication created", "publication", pubName, "sql", sql)
-	return nil
+
+	res, _ := sonic.Marshal(obj)
+	return res
 }
 
-// buildCreatePublicationSQL builds the CREATE PUBLICATION statement.
-func (p *PostgresSource) buildCreatePublicationSQL(pubName string) string {
-	quotedPub := utils.QuoteIdent(pubName)
-	if len(p.cfg.Tables) == 0 {
-		return fmt.Sprintf("CREATE PUBLICATION %s FOR ALL TABLES", quotedPub)
+// parseOid maps Postgres types to Go types for proper JSON encoding (numbers vs strings)
+func (p *PostgresSource) parseOid(val string, oid uint32) interface{} {
+	switch oid {
+	case 16: // bool
+		return val == "t"
+	case 20, 21, 23: // int8, int2, int4
+		i, _ := strconv.ParseInt(val, 10, 64)
+		return i
+	case 700, 701, 1700: // float4, float8, numeric
+		f, _ := strconv.ParseFloat(val, 64)
+		return f
+	case 114, 3802: // json, jsonb
+		return json.RawMessage(val)
+	default:
+		return val
 	}
-	quoted := make([]string, len(p.cfg.Tables))
-	for i, t := range p.cfg.Tables {
-		quoted[i] = utils.QuoteIdent(t)
-	}
-	return fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s", quotedPub, strings.Join(quoted, ", "))
 }
 
-// connectAndStartReplication opens a replication connection and launches the read loop.
-func (p *PostgresSource) connectAndStartReplication(ackCh <-chan uint64, startLSN pglogrepl.LSN) error {
+// ... (ensureSetup, checkWalLevel, ensurePublication, buildCreatePublicationSQL remain similar but optimized)
+
+func (p *PostgresSource) connectAndStartReplication(startLSN pglogrepl.LSN) error {
 	if err := p.doConnect(startLSN); err != nil {
 		return err
 	}
-
-	slog.Info("postgres logical replication started", "slot", p.cfg.SlotName, "lsn", startLSN)
-	go p.ackLoop(ackCh)
+	// Launch the optimized read loop
 	go p.readLoopWithReconnect(startLSN)
 	return nil
 }
 
-// doConnect establishes the replication connection and starts replication.
-func (p *PostgresSource) doConnect(startLSN pglogrepl.LSN) error {
-	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?replication=database",
-		p.cfg.Username, p.cfg.Password, p.cfg.Host, p.cfg.Port, p.cfg.Database)
-
-	ctx := context.Background()
-	conn, err := pgconn.Connect(ctx, connStr)
-	if err != nil {
-		return fmt.Errorf("failed to connect to postgres: %w", err)
-	}
-	p.conn = conn
-
-	slotName := p.cfg.SlotName
-	pubName := p.cfg.PublicationName
-
-	// Create replication slot (ignore "already exists" error)
-	if _, err := pglogrepl.CreateReplicationSlot(ctx, conn, slotName, _outputPlugin, pglogrepl.CreateReplicationSlotOptions{
-		SnapshotAction: _snapshotAction,
-	}); err != nil {
-		slog.Warn("create replication slot (may already exist)", "slot", slotName, "err", err)
-	}
-
-	sysident, err := pglogrepl.IdentifySystem(ctx, conn)
-	if err != nil {
-		return fmt.Errorf("IdentifySystem failed: %w", err)
-	}
-
-	replicationStartLSN := sysident.XLogPos
-	if startLSN > 0 {
-		replicationStartLSN = startLSN
-	}
-
-	pluginArgs := []string{
-		fmt.Sprintf("proto_version '%s'", _protoVersion),
-		fmt.Sprintf("publication_names '%s'", pubName),
-	}
-
-	if err := pglogrepl.StartReplication(ctx, conn, slotName, replicationStartLSN, pglogrepl.StartReplicationOptions{
-		PluginArgs: pluginArgs,
-	}); err != nil {
-		return fmt.Errorf("StartReplication failed: %w", err)
-	}
-
-	return nil
-}
-
-// readLoopWithReconnect wraps readLoop with auto-reconnection on failure.
-// Uses exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s (capped at 32s).
-func (p *PostgresSource) readLoopWithReconnect(startLSN pglogrepl.LSN) {
-	backoff := 1 * time.Second
-	maxBackoff := 32 * time.Second
-
-	for {
-		select {
-		case <-p.stop:
-			return
-		default:
-		}
-
-		// readLoop returns on error — we reconnect
-		exitReason := p.readLoop(startLSN)
-
-		select {
-		case <-p.stop:
-			return
-		default:
-		}
-
-		slog.Warn("readLoop exited, attempting reconnect",
-			"instance", p.cfg.InstanceID,
-			"reason", exitReason,
-			"backoff", backoff)
-
-		// Close old connection
-		if p.conn != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			p.conn.Close(ctx)
-			cancel()
-		}
-
-		// Wait before reconnecting
-		select {
-		case <-time.After(backoff):
-		case <-p.stop:
-			return
-		}
-
-		// Use last flushed LSN as resume point
-		resumeLSN := pglogrepl.LSN(atomic.LoadUint64(&p.flushedLSN))
-		if resumeLSN == 0 {
-			resumeLSN = startLSN
-		}
-
-		if err := p.doConnect(resumeLSN); err != nil {
-			slog.Error("reconnect failed", "instance", p.cfg.InstanceID, "err", err)
-			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
-			continue
-		}
-
-		// Reset backoff on successful reconnect
-		backoff = 1 * time.Second
-		startLSN = resumeLSN
-		slog.Info("reconnected successfully", "instance", p.cfg.InstanceID, "resume_lsn", resumeLSN)
-	}
-}
-
-// ackLoop continuously receives ACKs from the pipeline and updates the highest flushed LSN.
-func (p *PostgresSource) ackLoop(ackCh <-chan uint64) {
-	for {
-		select {
-		case <-p.stop:
-			return
-		case lsn, ok := <-ackCh:
-			if !ok {
-				return
-			}
-			// Only update if the new LSN is greater than the current one (safety check)
-			current := atomic.LoadUint64(&p.flushedLSN)
-			if lsn > current {
-				atomic.StoreUint64(&p.flushedLSN, lsn)
-			}
-		}
-	}
-}
-
-// readLoop continuously reads WAL messages and dispatches CDC events.
-// Returns a reason string when it exits (for reconnect logging).
 func (p *PostgresSource) readLoop(startLSN pglogrepl.LSN) string {
 	clientLSN := startLSN
 	nextStandby := time.Now().Add(_standbyInterval)
-	relations := make(map[uint32]*pglogrepl.RelationMessage)
 
 	for {
 		select {
@@ -418,18 +255,13 @@ func (p *PostgresSource) readLoop(startLSN pglogrepl.LSN) string {
 			nextStandby = time.Now().Add(_standbyInterval)
 		}
 
+		// Set a read deadline to prevent hanging forever
 		rawMsg, err := p.receiveMessage(nextStandby)
 		if err != nil {
 			if pgconn.Timeout(err) {
 				continue
 			}
-			slog.Error("receive message failed", "err", err)
 			return fmt.Sprintf("receive error: %v", err)
-		}
-
-		if errMsg, ok := rawMsg.(*pgproto3.ErrorResponse); ok {
-			slog.Error("postgres error response", "severity", errMsg.Severity, "message", errMsg.Message)
-			return fmt.Sprintf("postgres error: %s", errMsg.Message)
 		}
 
 		msg, ok := rawMsg.(*pgproto3.CopyData)
@@ -437,120 +269,283 @@ func (p *PostgresSource) readLoop(startLSN pglogrepl.LSN) string {
 			continue
 		}
 
-		clientLSN, nextStandby = p.handleCopyData(msg, clientLSN, nextStandby, relations)
+		// Optimized handleCopyData
+		switch msg.Data[0] {
+		case pglogrepl.PrimaryKeepaliveMessageByteID:
+			pkm, _ := pglogrepl.ParsePrimaryKeepaliveMessage(msg.Data[1:])
+			if pkm.ServerWALEnd > clientLSN {
+				clientLSN = pkm.ServerWALEnd
+			}
+			if pkm.ReplyRequested {
+				nextStandby = time.Time{}
+			}
+		case pglogrepl.XLogDataByteID:
+			xld, _ := pglogrepl.ParseXLogData(msg.Data[1:])
+			logicalMsg, _ := pglogrepl.Parse(xld.WALData)
+
+			lsn := uint64(xld.WALStart + pglogrepl.LSN(len(xld.WALData)))
+			p.dispatchToWorkers(logicalMsg, lsn)
+			clientLSN = xld.WALStart + pglogrepl.LSN(len(xld.WALData))
+		}
 	}
 }
 
-// sendStandbyUpdate sends a WAL position update to PostgreSQL.
-func (p *PostgresSource) sendStandbyUpdate(clientLSN pglogrepl.LSN) {
-	flushed := pglogrepl.LSN(atomic.LoadUint64(&p.flushedLSN))
-
-	// If no events have been flushed yet, use the initial client LSN
-	flushPos := flushed
-	if flushPos == 0 {
-		flushPos = clientLSN
-	}
-
-	if err := pglogrepl.SendStandbyStatusUpdate(context.Background(), p.conn, pglogrepl.StandbyStatusUpdate{
-		WALWritePosition: clientLSN,
-		WALFlushPosition: flushPos,
-		WALApplyPosition: flushPos,
-	}); err != nil {
-		slog.Error("standby status update failed", "err", err)
+func (p *PostgresSource) singleOrderedWorker() {
+	defer p.wg.Done()
+	for task := range p.taskChan {
+		p.processTask(task)
 	}
 }
 
-// receiveMessage reads a single message with a deadline.
-func (p *PostgresSource) receiveMessage(deadline time.Time) (pgproto3.BackendMessage, error) {
-	ctx, cancel := context.WithDeadline(context.Background(), deadline)
-	defer cancel()
-	return p.conn.ReceiveMessage(ctx)
-}
+// dispatchToWorkers pushes the task to the worker pool channel
+func (p *PostgresSource) dispatchToWorkers(msg pglogrepl.Message, lsn uint64) {
+	ts := time.Now().UnixMilli()
 
-// handleCopyData processes a single CopyData message (keepalive or xlog data).
-func (p *PostgresSource) handleCopyData(
-	msg *pgproto3.CopyData,
-	clientLSN pglogrepl.LSN,
-	nextStandby time.Time,
-	relations map[uint32]*pglogrepl.RelationMessage,
-) (pglogrepl.LSN, time.Time) {
-	switch msg.Data[0] {
-	case pglogrepl.PrimaryKeepaliveMessageByteID:
-		return p.handleKeepalive(msg.Data[1:], clientLSN, nextStandby)
-	case pglogrepl.XLogDataByteID:
-		return p.handleXLogData(msg.Data[1:], clientLSN, nextStandby, relations)
-	}
-	return clientLSN, nextStandby
-}
-
-// handleKeepalive processes a primary keepalive message.
-func (p *PostgresSource) handleKeepalive(data []byte, clientLSN pglogrepl.LSN, nextStandby time.Time) (pglogrepl.LSN, time.Time) {
-	pkm, err := pglogrepl.ParsePrimaryKeepaliveMessage(data)
-	if err != nil {
-		slog.Error("parse keepalive failed", "err", err)
-		return clientLSN, nextStandby
-	}
-	if pkm.ServerWALEnd > clientLSN {
-		clientLSN = pkm.ServerWALEnd
-	}
-	if pkm.ReplyRequested {
-		nextStandby = time.Time{} // force immediate reply
-	}
-	return clientLSN, nextStandby
-}
-
-// handleXLogData parses xlog data and dispatches CDC events.
-func (p *PostgresSource) handleXLogData(
-	data []byte,
-	clientLSN pglogrepl.LSN,
-	nextStandby time.Time,
-	relations map[uint32]*pglogrepl.RelationMessage,
-) (pglogrepl.LSN, time.Time) {
-	xld, err := pglogrepl.ParseXLogData(data)
-	if err != nil {
-		slog.Error("parse xlog data failed", "err", err)
-		return clientLSN, nextStandby
+	// 1. Handle RelationMessage because it needs Write Lock
+	if v, ok := msg.(*pglogrepl.RelationMessage); ok {
+		p.relMu.Lock()
+		p.relations[v.RelationID] = v
+		p.relMu.Unlock()
+		return
 	}
 
-	logicalMsg, err := pglogrepl.Parse(xld.WALData)
-	if err != nil {
-		slog.Error("parse logical message failed", "err", err)
-		return clientLSN, nextStandby
-	}
+	// 2. Handle other messages with Read Lock
+	p.relMu.RLock()
+	defer p.relMu.RUnlock()
 
-	p.dispatchLogicalMessage(logicalMsg, relations, uint64(xld.WALStart+pglogrepl.LSN(len(xld.WALData))))
-	return xld.WALStart + pglogrepl.LSN(len(xld.WALData)), nextStandby
-}
-
-// dispatchLogicalMessage routes a logical message to the appropriate handler.
-func (p *PostgresSource) dispatchLogicalMessage(msg pglogrepl.Message, relations map[uint32]*pglogrepl.RelationMessage, lsn uint64) {
 	switch v := msg.(type) {
-	case *pglogrepl.RelationMessage:
-		relations[v.RelationID] = v
 	case *pglogrepl.InsertMessage:
-		if rel, ok := relations[v.RelationID]; ok && p.isTableAllowed(rel.Namespace, rel.RelationName) {
-			p.emitEvent(constant.CreateAction.String(), rel, nil, v.Tuple.Columns, lsn)
+		if rel, ok := p.relations[v.RelationID]; ok && p.isTableAllowed(rel.Namespace, rel.RelationName) {
+			p.taskChan <- &walTask{op: "c", rel: rel, new: v.Tuple.Columns, lsn: lsn, ts: ts}
 		}
 	case *pglogrepl.UpdateMessage:
-		if rel, ok := relations[v.RelationID]; ok && p.isTableAllowed(rel.Namespace, rel.RelationName) {
-			var oldCols []*pglogrepl.TupleDataColumn
-			if v.OldTuple != nil {
-				oldCols = v.OldTuple.Columns
-			}
-			p.emitEvent(constant.UpdateAction.String(), rel, oldCols, v.NewTuple.Columns, lsn)
+		if rel, ok := p.relations[v.RelationID]; ok && p.isTableAllowed(rel.Namespace, rel.RelationName) {
+			p.taskChan <- &walTask{op: "u", rel: rel, old: v.OldTuple.Columns, new: v.NewTuple.Columns, lsn: lsn, ts: ts}
 		}
 	case *pglogrepl.DeleteMessage:
-		if rel, ok := relations[v.RelationID]; ok && p.isTableAllowed(rel.Namespace, rel.RelationName) {
-			var oldCols []*pglogrepl.TupleDataColumn
-			if v.OldTuple != nil {
-				oldCols = v.OldTuple.Columns
-			}
-			p.emitEvent(constant.DeleteAction.String(), rel, oldCols, nil, lsn)
+		if rel, ok := p.relations[v.RelationID]; ok && p.isTableAllowed(rel.Namespace, rel.RelationName) {
+			p.taskChan <- &walTask{op: "d", rel: rel, old: v.OldTuple.Columns, lsn: lsn, ts: ts}
 		}
 	}
 }
 
-// isTableAllowed checks the table filter. Empty list means all tables allowed.
+// ... (Other helper methods: isTableAllowed, Stop, runSnapshot remain largely the same)
+
+func (p *PostgresSource) Stop() error {
+	slog.Info("stopping postgres source")
+	close(p.stop)
+	close(p.taskChan) // Signal workers to stop
+	p.wg.Wait()       // Wait for all encoding tasks to finish
+
+	if p.conn != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return p.conn.Close(ctx)
+	}
+	return nil
+}
+
+// ensureSetup validates the environment and prepares the publication.
+func (p *PostgresSource) ensureSetup() error {
+	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s",
+		p.cfg.Username, p.cfg.Password, p.cfg.Host, p.cfg.Port, p.cfg.Database)
+
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, connStr)
+	if err != nil {
+		return fmt.Errorf("setup connection failed: %w", err)
+	}
+	defer conn.Close(ctx)
+
+	// Verify wal_level is logical
+	var walLevel string
+	if err := conn.QueryRow(ctx, "SHOW wal_level").Scan(&walLevel); err != nil {
+		return fmt.Errorf("failed to check wal_level: %w", err)
+	}
+	if walLevel != _walLevelLogical {
+		return fmt.Errorf("wal_level must be 'logical', current: %s", walLevel)
+	}
+
+	// Create publication if not exists
+	pubName := p.cfg.PublicationName
+	var exists bool
+	_ = conn.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM pg_publication WHERE pubname = $1)", pubName).Scan(&exists)
+
+	if !exists {
+		sql := p.buildCreatePublicationSQL(pubName)
+		if _, err := conn.Exec(ctx, sql); err != nil {
+			return fmt.Errorf("failed to create publication: %w", err)
+		}
+	}
+	return nil
+}
+
+func (p *PostgresSource) buildCreatePublicationSQL(pubName string) string {
+	quotedPub := utils.QuoteIdent(pubName)
+	if len(p.cfg.Tables) == 0 {
+		return fmt.Sprintf("CREATE PUBLICATION %s FOR ALL TABLES", quotedPub)
+	}
+	quoted := make([]string, len(p.cfg.Tables))
+	for i, t := range p.cfg.Tables {
+		quoted[i] = utils.QuoteIdent(t)
+	}
+	return fmt.Sprintf("CREATE PUBLICATION %s FOR TABLE %s", quotedPub, strings.Join(quoted, ", "))
+}
+
+// shouldSnapshot determines if an initial data export is needed.
+func (p *PostgresSource) shouldSnapshot(offset string) bool {
+	mode := strings.ToLower(p.cfg.SnapshotMode)
+	if mode == "always" {
+		return true
+	}
+	// Default behavior: snapshot if no previous LSN is recorded
+	if (mode == "initial" || mode == "") && offset == "" {
+		return true
+	}
+	return false
+}
+
+// runSnapshot performs chunked data export using a transaction-scoped cursor.
+func (p *PostgresSource) runSnapshot(ctx context.Context) error {
+	slog.Info("Starting high-performance snapshot", "instance", p.cfg.InstanceID)
+
+	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s",
+		p.cfg.Username, p.cfg.Password, p.cfg.Host, p.cfg.Port, p.cfg.Database)
+	conn, err := pgx.Connect(ctx, connStr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close(ctx)
+
+	for _, tableName := range p.cfg.Tables {
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			return err
+		}
+
+		quoted := utils.QuoteIdent(tableName)
+		// Declare cursor for chunked fetching (10k rows per fetch for performance)
+		_, _ = tx.Exec(ctx, fmt.Sprintf("DECLARE cdc_cursor CURSOR FOR SELECT * FROM %s", quoted))
+
+		for {
+			rows, err := tx.Query(ctx, "FETCH 10000 FROM cdc_cursor")
+			if err != nil {
+				break
+			}
+
+			fields := rows.FieldDescriptions()
+			count := 0
+			for rows.Next() {
+				values, _ := rows.Values()
+				// Reuse taskChan to leverage existing worker pool for encoding
+				// This keeps CPU usage balanced
+				p.taskChan <- p.wrapSnapshotRow(tableName, fields, values)
+				count++
+			}
+			rows.Close()
+			if count == 0 {
+				break
+			}
+		}
+		tx.Commit(ctx)
+	}
+	return nil
+}
+
+// wrapSnapshotRow converts a database row into a walTask for the workers.
+func (p *PostgresSource) wrapSnapshotRow(table string, fields []pgconn.FieldDescription, values []interface{}) *walTask {
+	data := make(map[string]interface{}, len(fields))
+	for i, field := range fields {
+		data[field.Name] = values[i]
+	}
+
+	// Use schema from config or default to public
+	parts := strings.Split(table, ".")
+	schema := "public"
+	tblName := table
+	if len(parts) == 2 {
+		schema = parts[0]
+		tblName = parts[1]
+	}
+
+	return &walTask{
+		op:        "r",
+		namespace: schema,
+		table:     tblName,
+		data:      data,
+		lsn:       0,
+		ts:        time.Now().UnixMilli(),
+	}
+}
+
+// doConnect establishes the physical replication connection.
+func (p *PostgresSource) doConnect(startLSN pglogrepl.LSN) error {
+	connStr := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?replication=database",
+		p.cfg.Username, p.cfg.Password, p.cfg.Host, p.cfg.Port, p.cfg.Database)
+
+	conn, err := pgconn.Connect(context.Background(), connStr)
+	if err != nil {
+		return err
+	}
+	p.conn = conn
+
+	// Ensure replication slot exists
+	_, _ = pglogrepl.CreateReplicationSlot(context.Background(), conn, p.cfg.SlotName, _outputPlugin,
+		pglogrepl.CreateReplicationSlotOptions{SnapshotAction: _snapshotAction})
+
+	return pglogrepl.StartReplication(context.Background(), conn, p.cfg.SlotName, startLSN,
+		pglogrepl.StartReplicationOptions{
+			PluginArgs: []string{
+				"proto_version '1'",
+				fmt.Sprintf("publication_names '%s'", p.cfg.PublicationName),
+			},
+		})
+}
+
+// readLoopWithReconnect handles automatic failover and backoff.
+func (p *PostgresSource) readLoopWithReconnect(startLSN pglogrepl.LSN) {
+	backoff := 1 * time.Second
+	for {
+		select {
+		case <-p.stop:
+			return
+		default:
+		}
+
+		errReason := p.readLoop(startLSN)
+		slog.Warn("Replication stream interrupted", "reason", errReason, "retry_in", backoff)
+
+		time.Sleep(backoff)
+
+		// Resume from the last acknowledged LSN
+		resumeLSN := pglogrepl.LSN(atomic.LoadUint64(&p.flushedLSN))
+		if resumeLSN == 0 {
+			resumeLSN = startLSN
+		}
+
+		if err := p.doConnect(resumeLSN); err == nil {
+			backoff = _defaultResetBackoff // Reset on success
+			startLSN = resumeLSN
+		} else {
+			backoff *= 2
+			if backoff > _defaultBackoff {
+				backoff = _defaultBackoff
+			}
+		}
+	}
+}
+
+// ackLoop manages the LSN feedback loop from the downstream pipeline.
+func (p *PostgresSource) ackLoop(ackCh <-chan uint64) {
+	for lsn := range ackCh {
+		current := atomic.LoadUint64(&p.flushedLSN)
+		if lsn > current {
+			atomic.StoreUint64(&p.flushedLSN, lsn)
+		}
+	}
+}
+
+// isTableAllowed filters tables based on the configuration.
 func (p *PostgresSource) isTableAllowed(namespace, table string) bool {
 	if len(p.tableMap) == 0 {
 		return true
@@ -558,159 +553,42 @@ func (p *PostgresSource) isTableAllowed(namespace, table string) bool {
 	return p.tableMap[table] || p.tableMap[fmt.Sprintf("%s.%s", namespace, table)]
 }
 
-// emitEvent converts WAL tuple data into a models.Event and sends it to the pipeline.
-func (p *PostgresSource) emitEvent(op string, rel *pglogrepl.RelationMessage, oldCols, newCols []*pglogrepl.TupleDataColumn, lsn uint64) {
-	before := decodeTupleAsJSON(rel, oldCols)
-	after := decodeTupleAsJSON(rel, newCols)
-	slog.Debug("cdc event", "op", op, "schema", rel.Namespace, "table", rel.RelationName)
-	topic := p.cfg.Topic
-	if topic == "" {
-		topic = "cdc"
-	}
-	p.pipeline <- models.NewEvent(topic, op, p.cfg.InstanceID, rel.Namespace, rel.RelationName, before, after, lsn, strconv.FormatUint(lsn, 10))
-}
+// sendStandbyUpdate sends a WAL position update to PostgreSQL.
+// This prevents the server from recycling WAL segments we haven't processed yet.
+func (p *PostgresSource) sendStandbyUpdate(clientLSN pglogrepl.LSN) {
+	// We report three positions:
+	// 1. Write: The LSN we just received from the network.
+	// 2. Flush: The LSN that has been successfully acknowledged (ACK) by our pipeline.
+	// 3. Apply: Same as Flush in most CDC scenarios.
+	flushed := pglogrepl.LSN(atomic.LoadUint64(&p.flushedLSN))
 
-// escapeJSON safely escapes double quotes and backslashes in JSON strings.
-func escapeJSON(s string) string {
-	b, _ := json.Marshal(s)
-	// Marshal includes leading and trailing quotes, we strip them.
-	return string(b[1 : len(b)-1])
-}
-
-// decodeTupleAsJSON maps WAL column data directly to a JSON byte array.
-func decodeTupleAsJSON(rel *pglogrepl.RelationMessage, cols []*pglogrepl.TupleDataColumn) json.RawMessage {
-	if cols == nil {
-		return nil
+	// If no events have been flushed/ACKed yet, we use the clientLSN
+	// to avoid telling Postgres we are at position 0.
+	flushPos := flushed
+	if flushPos == 0 {
+		flushPos = clientLSN
 	}
 
-	var buf strings.Builder
-	buf.WriteByte('{')
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	first := true
-	for i, col := range cols {
-		if i >= len(rel.Columns) {
-			break
-		}
+	err := pglogrepl.SendStandbyStatusUpdate(ctx, p.conn, pglogrepl.StandbyStatusUpdate{
+		WALWritePosition: clientLSN,
+		WALFlushPosition: flushPos,
+		WALApplyPosition: flushPos,
+		ReplyRequested:   false,
+	})
 
-		if col.DataType == 'u' {
-			continue // 'u' = unchanged TOAST
-		}
-
-		if !first {
-			buf.WriteByte(',')
-		}
-		first = false
-
-		name := rel.Columns[i].Name
-		oid := rel.Columns[i].DataType
-
-		buf.WriteString(`"` + escapeJSON(name) + `":`)
-
-		switch col.DataType {
-		case 't': // text representation
-			writeColumnJSON(&buf, string(col.Data), oid)
-		case 'n': // explicit NULL
-			buf.WriteString("null")
-		}
-	}
-	buf.WriteByte('}')
-	return json.RawMessage(buf.String())
-}
-
-// PostgreSQL OIDs — https://github.com/postgres/postgres/blob/master/src/include/catalog/pg_type.dat
-const (
-	oidBool        = 16
-	oidInt2        = 21
-	oidInt4        = 23
-	oidInt8        = 20
-	oidFloat4      = 700
-	oidFloat8      = 701
-	oidNumeric     = 1700
-	oidTimestamp   = 1114
-	oidTimestampTZ = 1184
-	oidDate        = 1082
-	oidJSON        = 114
-	oidJSONB       = 3802
-	oidUUID        = 2950
-	oidText        = 25
-	oidVarchar     = 1043
-	oidBpchar      = 1042 // char(n)
-)
-
-// writeStringJSON writes a JSON encoded string to the buffer
-func writeStringJSON(buf *strings.Builder, s string) {
-	b, _ := json.Marshal(s)
-	buf.Write(b)
-}
-
-// writeColumnJSON converts a text-encoded PG value to JSON bytes.
-func writeColumnJSON(buf *strings.Builder, raw string, oid uint32) {
-	switch oid {
-	case oidBool:
-		if raw == "t" || raw == "true" {
-			buf.WriteString("true")
-		} else {
-			buf.WriteString("false")
-		}
-	case oidInt2, oidInt4, oidInt8:
-		if _, err := strconv.ParseInt(raw, 10, 64); err == nil {
-			buf.WriteString(raw)
-		} else {
-			writeStringJSON(buf, raw)
-		}
-	case oidFloat4, oidFloat8, oidNumeric:
-		if _, err := strconv.ParseFloat(raw, 64); err == nil {
-			buf.WriteString(raw)
-		} else {
-			writeStringJSON(buf, raw)
-		}
-
-	case oidTimestamp:
-		// PG format: "2026-03-10 09:19:25.788595"
-		for _, layout := range pgTimestampLayouts {
-			if t, err := time.Parse(layout, raw); err == nil {
-				buf.WriteString(strconv.FormatInt(t.UnixMilli(), 10))
-				return
-			}
-		}
-		writeStringJSON(buf, raw)
-
-	case oidTimestampTZ:
-		// PG format: "2026-03-10 09:19:25.788595+00"
-		for _, layout := range pgTimestampTZLayouts {
-			if t, err := time.Parse(layout, raw); err == nil {
-				buf.WriteString(strconv.FormatInt(t.UnixMilli(), 10))
-				return
-			}
-		}
-		writeStringJSON(buf, raw)
-
-	case oidDate:
-		if t, err := time.Parse(time.DateOnly, raw); err == nil {
-			buf.WriteString(strconv.FormatInt(t.UnixMilli(), 10))
-			return
-		}
-		writeStringJSON(buf, raw)
-
-	case oidJSON, oidJSONB:
-		buf.WriteString(raw)
-
-	default:
-		// text, varchar, uuid, and everything else → keep as string
-		writeStringJSON(buf, raw)
+	if err != nil {
+		slog.Error("Failed to send standby status update", "err", err, "instance", p.cfg.InstanceID)
 	}
 }
 
-// Timestamp layouts for parsing PG timestamp without timezone.
-var pgTimestampLayouts = []string{
-	"2006-01-02 15:04:05.999999",
-	"2006-01-02 15:04:05",
-}
+// receiveMessage reads a single message from the replication stream with a deadline.
+func (p *PostgresSource) receiveMessage(deadline time.Time) (pgproto3.BackendMessage, error) {
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
 
-// Timestamp layouts for parsing PG timestamptz.
-var pgTimestampTZLayouts = []string{
-	"2006-01-02 15:04:05.999999-07",
-	"2006-01-02 15:04:05.999999-07:00",
-	"2006-01-02 15:04:05-07",
-	"2006-01-02 15:04:05-07:00",
+	// Direct call to pgx's connection to pull the next message from the buffer
+	return p.conn.ReceiveMessage(ctx)
 }

@@ -2,46 +2,60 @@ package models
 
 import (
 	"encoding/json"
-	"time"
 )
 
-// Event represents a CDC event payload
+// Event represents a CDC event envelope for routing and transport.
 type Event struct {
-	// Op is the operation type: "c" (create), "u" (update), "d" (delete)
-	Op string `json:"op"`
-	// InstanceID identifies the source CDC instance
+	// --- Metadata for routing and management ---
+	Topic      string `json:"-"`
+	Subject    string `json:"-"`
 	InstanceID string `json:"instance_id"`
-	// Database name
-	Database string `json:"database"`
-	// Table name
-	Table string `json:"table"`
-	// Before state of the row (only for update and delete)
-	Before json.RawMessage `json:"before,omitempty"`
-	// After state of the row (only for create and update)
-	After json.RawMessage `json:"after,omitempty"`
-	// Timestamp when the event occurred (in Unix milliseconds)
-	Timestamp int64 `json:"timestamp"`
-	// LSN tracked for backward compatibility with PostgresSource and old workers
-	LSN uint64 `json:"-"`
-	// Offset is the generic position in the source log (e.g. LSN or binlog file:pos)
-	Offset string `json:"offset,omitempty"`
-	// Topic to publish the event to
-	Topic string `json:"topic,omitempty"`
+	Schema     string `json:"schema"`
+	Table      string `json:"table"`
+	Op         string `json:"op"`
+	Offset     string `json:"offset"`
+	LSN        uint64 `json:"lsn"`
+
+	// --- Raw Debezium Payload ---
+	// Data is the pre-serialized JSON bytes in Debezium format.
+	Data []byte `json:"-"`
 }
 
-// NewEvent creates a new CDC event
-func NewEvent(topic, op, instanceID, db, table string, before, after json.RawMessage, lsn uint64, offset string) *Event {
+// DebeziumPayload represents the industry-standard CDC format.
+type DebeziumPayload struct {
+	Op          string          `json:"op"` // "c", "u", "d", "r"
+	Before      json.RawMessage `json:"before,omitempty"`
+	After       json.RawMessage `json:"after,omitempty"`
+	Source      SourceMetadata  `json:"source"`
+	TimestampMS int64           `json:"ts_ms"`
+}
+
+// SourceMetadata contains origin information for the event.
+type SourceMetadata struct {
+	Version   string `json:"version"`
+	Connector string `json:"connector"`
+	Name      string `json:"name"`
+	TsMs      int64  `json:"ts_ms"`
+	Snapshot  string `json:"snapshot"`
+	DB        string `json:"db"`
+	Schema    string `json:"schema"`
+	Table     string `json:"table"`
+	LSN       uint64 `json:"lsn"`
+	TxId      int64  `json:"txId,omitempty"`
+}
+
+// NewEvent creates a new CDC event envelope.
+func NewEvent(topic, subject, instanceID, schema, table, op string, lsn uint64, offset string, data []byte) *Event {
 	return &Event{
 		Topic:      topic,
-		Op:         op,
+		Subject:    subject,
 		InstanceID: instanceID,
-		Database:   db,
+		Schema:     schema,
 		Table:      table,
-		Timestamp:  time.Now().UnixMilli(),
-		Before:     before,
-		After:      after,
+		Op:         op,
 		LSN:        lsn,
 		Offset:     offset,
+		Data:       data,
 	}
 }
 
