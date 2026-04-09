@@ -2,12 +2,14 @@ package postgres
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/bytedance/sonic"
+	"github.com/bytedance/sonic/ast"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -29,8 +31,11 @@ type PostgresSink struct {
 	pool *pgxpool.Pool
 	cfg  *config.SinkConfig
 
-	mu   sync.Mutex
-	done chan struct{}
+	mu     sync.Mutex
+	events []*models.Event
+	done   chan struct{}
+
+	flushTicker *time.Ticker
 
 	// tableCache tracks tables we've already ensured exist in this session
 	tableCache sync.Map
@@ -53,12 +58,30 @@ func New(cfg *config.SinkConfig) (*PostgresSink, error) {
 	}
 
 	s := &PostgresSink{
-		pool: pool,
-		cfg:  cfg,
-		done: make(chan struct{}),
+		pool:        pool,
+		cfg:         cfg,
+		done:        make(chan struct{}),
+		flushTicker: time.NewTicker(time.Duration(cfg.FlushIntervalMs) * time.Millisecond),
 	}
 
+	go s.flushLoop()
 	return s, nil
+}
+
+func (s *PostgresSink) flushLoop() {
+	for {
+		select {
+		case <-s.flushTicker.C:
+			s.mu.Lock()
+			if err := s.flushLocked(); err != nil {
+				slog.Error("periodic flush failed in postgres sink", "err", err)
+			}
+			s.mu.Unlock()
+		case <-s.done:
+			s.flushTicker.Stop()
+			return
+		}
+	}
 }
 
 // Write applies a single CDC event to the target database.
@@ -66,9 +89,27 @@ func (s *PostgresSink) Write(event *models.Event) error {
 	return s.WriteBatch([]*models.Event{event})
 }
 
-// WriteBatch applies a batch of CDC events to the target database within a single transaction.
+// WriteBatch buffers a batch of CDC events.
 func (s *PostgresSink) WriteBatch(events []*models.Event) error {
-	if len(events) == 0 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.events = append(s.events, events...)
+
+	if len(s.events) >= int(s.cfg.BatchSize) {
+		return s.flushLocked()
+	}
+	return nil
+}
+
+func (s *PostgresSink) Flush() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.flushLocked()
+}
+
+func (s *PostgresSink) flushLocked() error {
+	if len(s.events) == 0 {
 		return nil
 	}
 
@@ -79,51 +120,57 @@ func (s *PostgresSink) WriteBatch(events []*models.Event) error {
 	}
 	defer tx.Rollback(ctx)
 
-	for _, event := range events {
-		var payload models.DebeziumPayload
-		if err := json.Unmarshal(event.Data, &payload); err != nil {
-			slog.Error("failed to unmarshal Debezium payload in Postgres sink", "err", err)
+	for _, event := range s.events {
+		var node ast.Node
+		var err error
+
+		// Extract the relevant payload (JSON bytes) using AST manipulation (Zero-Unmarshal)
+		if event.Op == "d" {
+			node, err = sonic.Get(event.Data, "before")
+		} else {
+			node, err = sonic.Get(event.Data, "after")
+		}
+
+		if err != nil || !node.Exists() {
 			continue
 		}
 
-		docMap := payload.After
-		if payload.Op == "d" {
-			docMap = payload.Before
-		}
-		if len(docMap) == 0 {
-			continue
-		}
-
-		// Apply field mapping if configured
-		// Note: ApplyFieldMapping historically took json.RawMessage and returned json.RawMessage
-		// Since docMap is already json.RawMessage, this stays the same.
-		mappedDoc, err := s.cfg.ApplyFieldMapping(docMap)
+		docBytes, err := node.MarshalJSON()
 		if err != nil {
-			return fmt.Errorf("field mapping failed: %w", err)
+			continue
+		}
+
+		// Apply field mapping/transformations
+		mappedDoc, err := s.cfg.ApplyFieldMapping(docBytes)
+		if err != nil {
+			slog.Error("field mapping failed in postgres sink", "err", err, "table", event.Table)
+			continue
 		}
 
 		var data map[string]interface{}
-		if err := json.Unmarshal(mappedDoc, &data); err != nil {
-			return fmt.Errorf("unmarshal mapped data failed: %w", err)
+		if err := sonic.Unmarshal(mappedDoc, &data); err != nil {
+			slog.Error("unmarshal mapped data failed in postgres sink", "err", err)
+			continue
 		}
 
 		tableName := event.Table
 		pk, ok := s.cfg.PrimaryKeys[tableName]
 		if !ok {
-			pk = "id" // default to "id"
+			pk = "id"
 		}
 
 		pkValue, ok := data[pk]
-		if !ok && payload.Op != "c" {
-			return fmt.Errorf("primary key %q not found in data for table %q", pk, tableName)
+		if !ok && event.Op != "c" {
+			slog.Warn("primary key not found in data", "pk", pk, "table", tableName)
+			continue
 		}
 
-		// Self-healing: Ensure table and primary key exist
+		// Self-healing: Ensure table exist
 		if err := s.ensureTable(ctx, tableName, data, pk); err != nil {
 			return fmt.Errorf("failed to ensure table %s: %w", tableName, err)
 		}
 
-		switch payload.Op {
+		switch event.Op {
 		case "d":
 			query := fmt.Sprintf("DELETE FROM %s WHERE %s = $1", tableName, pk)
 			if _, err := tx.Exec(ctx, query, pkValue); err != nil {
@@ -134,7 +181,7 @@ func (s *PostgresSink) WriteBatch(events []*models.Event) error {
 				return fmt.Errorf("upsert failed: %w", err)
 			}
 		default:
-			slog.Warn("unknown operation type", "op", payload.Op)
+			slog.Warn("unknown operation type", "op", event.Op)
 		}
 	}
 
@@ -142,6 +189,8 @@ func (s *PostgresSink) WriteBatch(events []*models.Event) error {
 		return fmt.Errorf("commit transaction failed: %w", err)
 	}
 
+	// Reset buffer
+	s.events = s.events[:0]
 	return nil
 }
 
@@ -228,40 +277,6 @@ func (s *PostgresSink) inferPGType(v interface{}) string {
 	default:
 		return "TEXT"
 	}
-}
-
-func (s *PostgresSink) upsert(ctx context.Context, table string, pk string, data map[string]interface{}) error {
-	cols := make([]string, 0, len(data))
-	vals := make([]interface{}, 0, len(data))
-	placeholders := make([]string, 0, len(data))
-	updates := make([]string, 0, len(data)-1)
-
-	i := 1
-	for k, v := range data {
-		cols = append(cols, k)
-		vals = append(vals, v)
-		placeholders = append(placeholders, fmt.Sprintf("$%d", i))
-		if k != pk {
-			updates = append(updates, fmt.Sprintf("%s = EXCLUDED.%s", k, k))
-		}
-		i++
-	}
-
-	query := fmt.Sprintf(
-		"INSERT INTO %s (%s) VALUES (%s) ON CONFLICT (%s) DO UPDATE SET %s",
-		table,
-		strings.Join(cols, ", "),
-		strings.Join(placeholders, ", "),
-		pk,
-		strings.Join(updates, ", "),
-	)
-
-	_, err := s.pool.Exec(ctx, query, vals...)
-	return err
-}
-
-func (s *PostgresSink) Flush() error {
-	return nil
 }
 
 func (s *PostgresSink) Close() error {

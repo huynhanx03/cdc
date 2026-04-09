@@ -89,7 +89,18 @@ type SinkConfig struct {
 
 	// Internal compiled programs
 	programs     map[string]cel.Program
+	keyProgram   cel.Program
 	programsOnce sync.Once
+
+	Redis RedisSettings `mapstructure:"redis"`
+}
+
+// RedisSettings holds specific configuration for Redis sinks.
+type RedisSettings struct {
+	Command     string   `mapstructure:"command"`      // set, hset, sadd, bf_add
+	KeyTemplate string   `mapstructure:"key_template"` // CEL template
+	ValueFields []string `mapstructure:"value_fields"`  // fields to use for non-hash commands
+	TTL         int      `mapstructure:"ttl"`          // seconds
 }
 
 // NATSConfig holds the configuration for NATS JetStream.
@@ -286,8 +297,36 @@ func (s *SinkConfig) CompileTransformations() error {
 			}
 			s.programs[field] = prog
 		}
+
+		// Compile KeyTemplate if present
+		if s.Redis.KeyTemplate != "" {
+			ast, iss := env.Compile(s.Redis.KeyTemplate)
+			if iss.Err() != nil {
+				err = fmt.Errorf("key template compilation error: %w", iss.Err())
+				return
+			}
+			prog, progErr := env.Program(ast)
+			if progErr != nil {
+				err = fmt.Errorf("key template program error: %w", progErr)
+				return
+			}
+			s.keyProgram = prog
+		}
 	})
 	return err
+}
+
+// BuildKey evaluates the Redis key using the CEL KeyTemplate.
+func (s *SinkConfig) BuildKey(data map[string]interface{}, fallback string) string {
+	if s.keyProgram == nil {
+		return fallback
+	}
+
+	out, _, err := s.keyProgram.Eval(map[string]interface{}{"data": data})
+	if err != nil {
+		return fallback
+	}
+	return fmt.Sprintf("%v", out.Value())
 }
 
 // ApplyFieldMapping transforms the record payload.

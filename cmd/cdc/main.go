@@ -23,6 +23,8 @@ import (
 	_ "github.com/foden/cdc/pkg/sink/postgres"
 	_ "github.com/foden/cdc/pkg/sink/stdout"
 	_ "github.com/foden/cdc/pkg/sink/webhook"
+	_ "github.com/foden/cdc/pkg/sink/redis"
+	_ "github.com/foden/cdc/pkg/sink/clickhouse"
 	_ "github.com/foden/cdc/pkg/source/mysql"
 	_ "github.com/foden/cdc/pkg/source/postgres"
 	_ "github.com/foden/cdc/pkg/source/rest"

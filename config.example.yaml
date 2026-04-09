@@ -42,14 +42,23 @@ pipeline:
   subject_filter: ["cdc.>"]
 
 sinks:
-  - type: "elasticsearch"
-    url: ["http://127.0.0.1:9200"]
-    index_prefix: "cdc_"
-    batch_size: 100
+  - type: "clickhouse"
+    host: "127.0.0.1"
+    port: 9000
+    database: "default"
+    batch_size: 500
     flush_interval_ms: 1000
-    # Add field renamings (e.g. rename "id" to "user_id")
-    # field_mapping:
-    #   id: "user_id"
+
+  - type: "redis"
+    host: "127.0.0.1"
+    port: 6379
+    redis:
+      command: "hset"                          # Options: set, hset, sadd, bf_add
+      key_template: "cache:user:{{.data.id}}"  # CEL-based key generation
+      ttl: 3600                                # Cache expiry in seconds
+    batch_size: 100
+    flush_interval_ms: 500
+
   # - type: "stdout"
 
 server:
