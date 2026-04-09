@@ -30,7 +30,7 @@ const (
 	_standbyInterval     = 10 * time.Second
 	_walLevelLogical     = "logical"
 	_snapshotAction      = "NOEXPORT_SNAPSHOT"
-	_defaultBackoff      = 30 * time.Second
+	_maxResetBackoff     = 30 * time.Second
 	_defaultResetBackoff = 1 * time.Second
 )
 
@@ -504,7 +504,7 @@ func (p *PostgresSource) doConnect(startLSN pglogrepl.LSN) error {
 
 // readLoopWithReconnect handles automatic failover and backoff.
 func (p *PostgresSource) readLoopWithReconnect(startLSN pglogrepl.LSN) {
-	backoff := 1 * time.Second
+	backoff := _defaultResetBackoff
 	for {
 		select {
 		case <-p.stop:
@@ -528,8 +528,8 @@ func (p *PostgresSource) readLoopWithReconnect(startLSN pglogrepl.LSN) {
 			startLSN = resumeLSN
 		} else {
 			backoff *= 2
-			if backoff > _defaultBackoff {
-				backoff = _defaultBackoff
+			if backoff > _maxResetBackoff {
+				backoff = _maxResetBackoff
 			}
 		}
 	}

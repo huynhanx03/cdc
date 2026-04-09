@@ -6,11 +6,14 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/bytedance/sonic"
 	"github.com/go-mysql-org/go-mysql/canal"
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
+	"github.com/go-mysql-org/go-mysql/schema"
 
 	"github.com/foden/cdc/pkg/config"
 	"github.com/foden/cdc/pkg/constant"
@@ -18,6 +21,30 @@ import (
 	"github.com/foden/cdc/pkg/models"
 	"github.com/foden/cdc/pkg/registry"
 )
+
+const (
+	_defaultResetBackoff = 1 * time.Second
+	_maxResetBackoff     = 30 * time.Second
+)
+
+// mysqlTask represents a row change from binlog
+type mysqlTask struct {
+	op     string
+	db     string
+	table  *schema.Table
+	before []interface{}
+	after  []interface{}
+	lsn    uint64
+	offset string
+	ts     int64
+}
+
+// Pool for reusing maps to reduce GC pressure
+var columnPool = sync.Pool{
+	New: func() interface{} {
+		return make(map[string]interface{}, 32)
+	},
+}
 
 func init() {
 	registry.RegisterSource(constant.SourceTypeMySQL.String(), NewMySQLSource)
@@ -35,6 +62,10 @@ type MySQLSource struct {
 	pipeline chan<- *models.Event
 	tableMap map[string]bool
 	stop     chan struct{}
+
+	// Single worker for strict ordering
+	taskChan chan *mysqlTask
+	wg       sync.WaitGroup
 }
 
 // New creates a MySQLSource.
@@ -47,12 +78,17 @@ func New(cfg *config.SourceConfig) (*MySQLSource, error) {
 		cfg:      cfg,
 		tableMap: tm,
 		stop:     make(chan struct{}),
+		taskChan: make(chan *mysqlTask, 8192),
 	}, nil
 }
 
 // Start initializes the canal and begins streaming events.
 func (s *MySQLSource) Start(pipeline chan<- *models.Event, ackCh <-chan uint64, initialOffset string) error {
 	s.pipeline = pipeline
+
+	// Start exactly ONE worker to guarantee 100% order
+	s.wg.Add(1)
+	go s.singleOrderedWorker()
 
 	cfg := canal.NewDefaultConfig()
 	cfg.Addr = fmt.Sprintf("%s:%d", s.cfg.Host, s.cfg.Port)
@@ -91,8 +127,7 @@ func (s *MySQLSource) Start(pipeline chan<- *models.Event, ackCh <-chan uint64, 
 
 	// Run canal with auto-reconnect
 	go func() {
-		backoff := 1 * time.Second
-		maxBackoff := 32 * time.Second
+		backoff := _defaultResetBackoff
 
 		for {
 			select {
@@ -136,8 +171,8 @@ func (s *MySQLSource) Start(pipeline chan<- *models.Event, ackCh <-chan uint64, 
 				}
 
 				backoff *= 2
-				if backoff > maxBackoff {
-					backoff = maxBackoff
+				if backoff > _maxResetBackoff {
+					backoff = _maxResetBackoff
 				}
 
 				// Update offset from last synced position for resume
@@ -152,10 +187,12 @@ func (s *MySQLSource) Start(pipeline chan<- *models.Event, ackCh <-chan uint64, 
 	return nil
 }
 
-
 func (s *MySQLSource) Stop() error {
 	slog.Info("stopping mysql source", "instance", s.cfg.InstanceID)
 	close(s.stop)
+	close(s.taskChan) // Signal worker to stop
+	s.wg.Wait()       // Wait for processing to finish
+
 	if s.canal != nil {
 		s.canal.Close()
 	}
@@ -189,84 +226,124 @@ type eventHandler struct {
 
 func (h *eventHandler) OnRow(e *canal.RowsEvent) error {
 	for i := 0; i < len(e.Rows); {
-		var before, after json.RawMessage
+		var before, after []interface{}
+		op := "u"
 
-		dzOp := "u"
 		switch e.Action {
 		case canal.InsertAction:
-			dzOp = "c"
-			after = h.rowToJSON(e, e.Rows[i])
+			op = "c"
+			after = e.Rows[i]
 			i++
 		case canal.DeleteAction:
-			dzOp = "d"
-			before = h.rowToJSON(e, e.Rows[i])
+			op = "d"
+			before = e.Rows[i]
 			i++
 		case canal.UpdateAction:
-			dzOp = "u"
-			// Update comes in pairs: Old, New
+			op = "u"
 			if i+1 < len(e.Rows) {
-				before = h.rowToJSON(e, e.Rows[i])
-				after = h.rowToJSON(e, e.Rows[i+1])
+				before = e.Rows[i]
+				after = e.Rows[i+1]
 			}
 			i += 2
 		}
 
-		// Use log position as LSN for now (uint64)
 		lsn := uint64(e.Header.LogPos)
-
-		// Get current synced position for the generic offset string
 		pos := h.source.canal.SyncedPosition()
 		offset := fmt.Sprintf("%s:%d", pos.Name, pos.Pos)
 
-		payload := models.DebeziumPayload{
-			Op:     dzOp,
-			Before: before,
-			After:  after,
-			Source: models.SourceMetadata{
-				Version:   "1.0",
-				Connector: "mysql",
-				Name:      h.source.cfg.InstanceID,
-				TsMs:      time.Now().UnixMilli(),
-				Snapshot:  "false",
-				DB:        e.Table.Schema,
-				Schema:    e.Table.Schema,
-				Table:     e.Table.Name,
-				LSN:       lsn,
-			},
-			TimestampMS: time.Now().UnixMilli(),
+		h.source.taskChan <- &mysqlTask{
+			op:     op,
+			db:     e.Table.Schema,
+			table:  e.Table,
+			before: before,
+			after:  after,
+			lsn:    lsn,
+			offset: offset,
+			ts:     time.Now().UnixMilli(),
 		}
-		data, _ := json.Marshal(payload)
-
-		topic := h.source.cfg.Topic
-		if topic == "" {
-			topic = "cdc"
-		}
-
-		subject := fmt.Sprintf("%s.%s.%s.%s", topic, h.source.cfg.InstanceID, e.Table.Schema, e.Table.Name)
-		h.source.pipeline <- models.NewEvent(
-			topic,
-			subject,
-			h.source.cfg.InstanceID,
-			e.Table.Schema,
-			e.Table.Name,
-			dzOp,
-			lsn,
-			offset,
-			data,
-		)
 	}
-
 	return nil
 }
 
-func (h *eventHandler) rowToJSON(e *canal.RowsEvent, row []interface{}) json.RawMessage {
-	res := make(map[string]interface{}, len(row))
-	for i, val := range row {
-		name := e.Table.Columns[i].Name
-		res[name] = formatValue(val)
+func (s *MySQLSource) singleOrderedWorker() {
+	defer s.wg.Done()
+	for task := range s.taskChan {
+		s.processTask(task)
 	}
-	b, _ := json.Marshal(res)
-	return json.RawMessage(b)
+}
+
+func (s *MySQLSource) processTask(t *mysqlTask) {
+	before := s.rowToMap(t.table, t.before)
+	after := s.rowToMap(t.table, t.after)
+
+	beforeData, _ := sonic.Marshal(before)
+	afterData, _ := sonic.Marshal(after)
+
+	// Recycle maps back to pool
+	if before != nil {
+		s.releaseMap(before)
+	}
+	if after != nil {
+		s.releaseMap(after)
+	}
+
+	payload := models.DebeziumPayload{
+		Op:     t.op,
+		Before: json.RawMessage(beforeData),
+		After:  json.RawMessage(afterData),
+		Source: models.SourceMetadata{
+			Version:   "1.0",
+			Connector: "mysql",
+			Name:      s.cfg.InstanceID,
+			TsMs:      t.ts,
+			Snapshot:  "false",
+			DB:        t.db,
+			Schema:    t.db,
+			Table:     t.table.Name,
+			LSN:       t.lsn,
+		},
+		TimestampMS: time.Now().UnixMilli(),
+	}
+
+	data, _ := sonic.Marshal(payload)
+
+	topic := s.cfg.Topic
+	if topic == "" {
+		topic = "cdc"
+	}
+
+	subject := fmt.Sprintf("%s.%s.%s.%s", topic, s.cfg.InstanceID, t.db, t.table.Name)
+	s.pipeline <- models.NewEvent(
+		topic,
+		subject,
+		s.cfg.InstanceID,
+		t.db,
+		t.table.Name,
+		t.op,
+		t.lsn,
+		t.offset,
+		data,
+	)
+}
+
+func (s *MySQLSource) rowToMap(table *schema.Table, row []interface{}) map[string]interface{} {
+	if row == nil {
+		return nil
+	}
+
+	obj := columnPool.Get().(map[string]interface{})
+	for i, val := range row {
+		name := table.Columns[i].Name
+		obj[name] = formatValue(val)
+	}
+	return obj
+}
+
+func (s *MySQLSource) releaseMap(m map[string]interface{}) {
+	for k := range m {
+		delete(m, k)
+	}
+	columnPool.Put(m)
 }
 
 func formatValue(val interface{}) interface{} {
