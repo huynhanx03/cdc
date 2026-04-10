@@ -17,6 +17,8 @@ import (
 	"github.com/foden/cdc/pkg/metrics"
 	"github.com/foden/cdc/pkg/models"
 	"github.com/foden/cdc/pkg/nats"
+	"github.com/foden/cdc/pkg/pool"
+	"github.com/foden/cdc/pkg/retry"
 	"github.com/foden/cdc/pkg/utils"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -60,6 +62,7 @@ type Engine struct {
 
 	// Sink workers
 	sinkCancels map[string]context.CancelFunc
+	sinkWgs     map[string]*sync.WaitGroup
 }
 
 // NewEngine creates a pipeline engine with configurable settings.
@@ -77,6 +80,7 @@ func NewEngine(cfg *config.Config, sources []interfaces.Source, sinks []interfac
 		sourceStats:    make(map[string]*models.ComponentStats),
 		sinkStats:      make(map[string]*models.ComponentStats),
 		sinkCancels:    make(map[string]context.CancelFunc),
+		sinkWgs:        make(map[string]*sync.WaitGroup),
 	}
 }
 
@@ -103,6 +107,9 @@ func (e *Engine) Start() error {
 	e.mu.Lock()
 	if e.sinkCancels == nil {
 		e.sinkCancels = make(map[string]context.CancelFunc)
+	}
+	if e.sinkWgs == nil {
+		e.sinkWgs = make(map[string]*sync.WaitGroup)
 	}
 	for _, sink := range e.sinks {
 		e.startSinkWorkersUnlocked(sink)
@@ -217,22 +224,28 @@ func (e *Engine) applyMiddleware(ev *models.Event) *models.Event {
 func (e *Engine) publishBatchWithRetry(subjectFunc func(*models.Event) string, batch []*models.Event) {
 	metrics.BatchSizeHistogram.WithLabelValues("producer").Observe(float64(len(batch)))
 
-	const maxRetries = 3
-	var err error
-	for i := 0; i < maxRetries; i++ {
-		err = e.natsClient.PublishBatch(context.Background(), subjectFunc, batch)
-		if err == nil {
-			for _, ev := range batch {
-				e.updateSourceStats(ev.InstanceID, true, "")
-			}
-			return
-		}
-		time.Sleep(time.Duration(i+1) * 100 * time.Millisecond) // Exponential backoff
-	}
+	_, err := retry.Do[struct{}](context.Background(), retry.Config[struct{}]{
+		MaxAttempts:  3,
+		IsRetryable:  retry.IsRetryable,
+		Delay:        100 * time.Millisecond,
+		MaxDelay:     1 * time.Second,
+		BackoffMult:  2.0,
+		OnRetry: func(attempt uint, err error) {
+			slog.Warn("publish batch retry", "attempt", attempt, _nameErr, err)
+		},
+	}, func() (struct{}, error) {
+		return struct{}{}, e.natsClient.PublishBatch(context.Background(), subjectFunc, batch)
+	})
 
-	slog.Error("failed to publish batch after retries", _nameErr, err)
+	if err != nil {
+		slog.Error("failed to publish batch after retries", _nameErr, err)
+		for _, ev := range batch {
+			e.updateSourceStats(ev.InstanceID, false, err.Error())
+		}
+		return
+	}
 	for _, ev := range batch {
-		e.updateSourceStats(ev.InstanceID, false, err.Error())
+		e.updateSourceStats(ev.InstanceID, true, "")
 	}
 }
 
@@ -254,10 +267,21 @@ func (e *Engine) publishBatch(subjectFunc func(*models.Event) string, batch []*m
 func (e *Engine) startSinkWorkersUnlocked(sink interfaces.Sink) {
 	ctx, cancel := context.WithCancel(context.Background())
 	e.sinkCancels[sink.InstanceID()] = cancel
+	
+	wg := &sync.WaitGroup{}
+	if e.sinkWgs == nil {
+		e.sinkWgs = make(map[string]*sync.WaitGroup)
+	}
+	e.sinkWgs[sink.InstanceID()] = wg
 
 	for i := 0; i < e.partitionCount; i++ {
 		e.wg.Add(1)
-		go e.worker(ctx, sink, i)
+		wg.Add(1)
+		partID := i
+		go func() {
+			defer wg.Done()
+			e.worker(ctx, sink, partID)
+		}()
 		metrics.ActiveWorkers.WithLabelValues(fmt.Sprintf("worker-%s", sink.InstanceID())).Inc()
 	}
 }
@@ -319,15 +343,14 @@ func (e *Engine) worker(ctx context.Context, sink interfaces.Sink, partID int) {
 			headers := msg.Headers()
 			lsn, _ := strconv.ParseUint(headers.Get(constant.HeaderLSN), 10, 64)
 
-			ev := &models.Event{
-				InstanceID: headers.Get(constant.HeaderInstanceID),
-				Offset:     headers.Get(constant.HeaderOffset),
-				LSN:        lsn,
-				Schema:     headers.Get(constant.HeaderSchema),
-				Table:      headers.Get(constant.HeaderTable),
-				Op:         headers.Get(constant.HeaderOp),
-				Data:       msg.Data(), // Pass through raw bytes
-			}
+			ev := pool.GetEvent()
+			ev.InstanceID = headers.Get(constant.HeaderInstanceID)
+			ev.Offset = headers.Get(constant.HeaderOffset)
+			ev.LSN = lsn
+			ev.Schema = headers.Get(constant.HeaderSchema)
+			ev.Table = headers.Get(constant.HeaderTable)
+			ev.Op = headers.Get(constant.HeaderOp)
+			ev.Data = msg.Data() // Pass through raw bytes
 
 			// Buffer event and message
 			pendingMsgs = append(pendingMsgs, msg)
@@ -339,6 +362,10 @@ func (e *Engine) worker(ctx context.Context, sink interfaces.Sink, partID int) {
 			metrics.BatchSizeHistogram.WithLabelValues("worker").Observe(float64(len(pendingMsgs)))
 			e.flushAndAck(sink, pendingMsgs, pendingEvents, partID)
 
+			// Return events to pool
+			for _, ev := range pendingEvents {
+				pool.PutEvent(ev)
+			}
 			pendingMsgs = pendingMsgs[:0]
 			pendingEvents = pendingEvents[:0]
 		}
@@ -349,10 +376,28 @@ func (e *Engine) flushAndAck(sink interfaces.Sink, msgs []jetstream.Msg, events 
 	if len(events) == 0 {
 		return
 	}
+	
+	// Architectural safeguard: Deep clone events so downstream sinks can retain them safely
+	// without violating our internal memory pooling use-after-free constraints
+	clonedEvents := make([]*models.Event, len(events))
+	for i, ev := range events {
+		clonedEvents[i] = &models.Event{
+			InstanceID: ev.InstanceID,
+			Offset:     ev.Offset,
+			LSN:        ev.LSN,
+			Schema:     ev.Schema,
+			Table:      ev.Table,
+			Op:         ev.Op,
+		}
+		if ev.Data != nil {
+			clonedEvents[i].Data = make([]byte, len(ev.Data))
+			copy(clonedEvents[i].Data, ev.Data)
+		}
+	}
 
 	start := time.Now()
 	// Write batch to sink
-	if err := sink.WriteBatch(events); err != nil {
+	if err := sink.WriteBatch(clonedEvents); err != nil {
 		e.handleSinkError(sink, msgs, err, workerID)
 		return
 	}
@@ -369,8 +414,8 @@ func (e *Engine) flushAndAck(sink interfaces.Sink, msgs []jetstream.Msg, events 
 	e.updateSinkStats(sink.InstanceID(), true, "")
 
 	// Handle Offsets and ACKs
-	latestOffsets := make(map[string]string)
-	highestLSNs := make(map[string]uint64)
+	latestOffsets := make(map[string]string, len(e.sourceAckChs))
+	highestLSNs := make(map[string]uint64, len(e.sourceAckChs))
 
 	for _, m := range msgs {
 		h := m.Headers()
@@ -424,18 +469,19 @@ func (e *Engine) handleSinkError(sink interfaces.Sink, msgs []jetstream.Msg, err
 	}
 }
 
-// Stop performs a graceful shutdown:
-// 1. Stop the source
-// 2. Close event channel which stops Producer
-// 3. Stop Workers
-// 4. Close Sinks
+// Stop performs a graceful shutdown with ordered phases and per-phase timeouts:
+// 1. Signal stop to workers
+// 2. Drain sources (10s timeout)
+// 3. Drain producer via event channel
+// 4. Cancel and wait for workers
+// 5. Close sinks (5s timeout each)
 func (e *Engine) Stop() {
 	if e.stopped.Swap(true) {
 		return // Already stopped
 	}
 	slog.Info("stopping pipeline engine")
 
-	// Lock only to snapshot data and close channels — no blocking I/O under lock.
+	// Phase 1: Snapshot data and signal stop
 	e.mu.Lock()
 	sourcesToStop := make([]interfaces.Source, len(e.sources))
 	copy(sourcesToStop, e.sources)
@@ -447,40 +493,66 @@ func (e *Engine) Stop() {
 
 	close(e.stopCh) // Globally stops workers first
 	e.mu.Unlock()
+	slog.Info("pipeline shutdown: phase 1/5 - stop signal sent")
 
-	// Stop sources — they may block on pipeline channel, so do this after stopCh
+	// Phase 2: Stop sources (they may block on pipeline channel)
 	for _, src := range sourcesToStop {
-		if err := src.Stop(); err != nil {
-			slog.Error("source stop error", "instance_id", src.InstanceID(), _nameErr, err)
+		done := make(chan struct{})
+		go func(s interfaces.Source) {
+			defer close(done)
+			if err := s.Stop(); err != nil {
+				slog.Error("source stop error", "instance_id", s.InstanceID(), _nameErr, err)
+			}
+		}(src)
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			slog.Warn("source stop timed out", "instance_id", src.InstanceID())
 		}
 	}
+	slog.Info("pipeline shutdown: phase 2/5 - sources stopped")
 
-	// Now safe to close the event channel
+	// Phase 3: Close event channel → producer drains and exits
 	close(e.eventCh)
+	slog.Info("pipeline shutdown: phase 3/5 - event channel closed")
 
+	// Phase 4: Cancel workers and wait
 	for _, cancel := range cancelsToCall {
 		cancel()
 	}
-
 	e.wg.Wait()
+	slog.Info("pipeline shutdown: phase 4/5 - workers stopped")
 
+	// Cleanup channels under lock
 	e.mu.Lock()
-	// Close all channel ACK to prevent Source from blocking
 	for id, ch := range e.sourceAckChs {
 		close(ch)
 		delete(e.sourceAckChs, id)
 	}
-	// Clear cancel map
 	for id := range e.sinkCancels {
 		delete(e.sinkCancels, id)
 	}
+	for id := range e.sinkWgs {
+		delete(e.sinkWgs, id)
+	}
 	e.mu.Unlock()
 
+	// Phase 5: Close sinks
 	for _, s := range e.sinks {
-		if err := s.Close(); err != nil {
-			slog.Error("sink close error", _nameErr, err)
+		done := make(chan struct{})
+		go func(sink interfaces.Sink) {
+			defer close(done)
+			if err := sink.Close(); err != nil {
+				slog.Error("sink close error", _nameErr, err)
+			}
+		}(s)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			slog.Warn("sink close timed out", "sink", s.InstanceID())
 		}
 	}
+	slog.Info("pipeline shutdown: phase 5/5 - sinks closed")
 	slog.Info("pipeline engine stopped")
 }
 
@@ -506,7 +578,10 @@ func (e *Engine) RemoveSource(instanceID string) error {
 		if src.InstanceID() == instanceID {
 			src.Stop()
 			e.sources = append(e.sources[:i], e.sources[i+1:]...)
-			delete(e.sourceAckChs, instanceID)
+			if ch, ok := e.sourceAckChs[instanceID]; ok {
+				close(ch)
+				delete(e.sourceAckChs, instanceID)
+			}
 			return nil
 		}
 	}
@@ -531,6 +606,10 @@ func (e *Engine) RemoveSink(instanceID string) error {
 				cancel()
 				delete(e.sinkCancels, instanceID)
 			}
+			if wg, ok := e.sinkWgs[instanceID]; ok {
+				wg.Wait()
+				delete(e.sinkWgs, instanceID)
+			}
 			s.Close()
 			e.sinks = append(e.sinks[:i], e.sinks[i+1:]...)
 			return nil
@@ -544,12 +623,12 @@ func (e *Engine) GetStats() (map[string]*models.ComponentStats, map[string]*mode
 	e.metricsMu.RLock()
 	defer e.metricsMu.RUnlock()
 
-	srcCopy := make(map[string]*models.ComponentStats)
+	srcCopy := make(map[string]*models.ComponentStats, len(e.sourceStats))
 	for k, v := range e.sourceStats {
 		srcCopy[k] = v
 	}
 
-	sinkCopy := make(map[string]*models.ComponentStats)
+	sinkCopy := make(map[string]*models.ComponentStats, len(e.sinkStats))
 	for k, v := range e.sinkStats {
 		sinkCopy[k] = v
 	}

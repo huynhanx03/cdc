@@ -3,9 +3,9 @@ package constant
 type ActionDB string
 
 const (
-	CreateAction ActionDB = "c"
-	UpdateAction ActionDB = "u"
-	DeleteAction ActionDB = "d"
+	CreateAction   ActionDB = "c"
+	UpdateAction   ActionDB = "u"
+	DeleteAction   ActionDB = "d"
 	SnapshotAction ActionDB = "s"
 )
 

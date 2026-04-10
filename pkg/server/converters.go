@@ -5,6 +5,7 @@ import (
 
 	cdcpb "github.com/foden/cdc/api/proto/v1"
 	"github.com/foden/cdc/pkg/config"
+	"github.com/foden/cdc/pkg/constant"
 )
 
 var (
@@ -53,7 +54,7 @@ func toSourceConfig(p *cdcpb.SourceConfig) (*config.SourceConfig, error) {
 	}
 
 	// Apply defaults
-	if c.Type == "postgres" {
+	if c.Type == string(constant.SourceTypePostgres) {
 		if c.SlotName == "" {
 			c.SlotName = "cdc_slot"
 		}
