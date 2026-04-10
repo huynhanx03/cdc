@@ -12,7 +12,7 @@ type TypeDecoder struct {
 }
 
 // Decode converts PostgreSQL text-format data into a Go value using the type map.
-func (d *TypeDecoder) Decode(typeMap *pgtype.Map, data []byte) (interface{}, error) {
+func (d *TypeDecoder) Decode(typeMap *pgtype.Map, data []byte) (any, error) {
 	if dt, ok := typeMap.TypeForOID(d.oid); ok {
 		return dt.Codec.DecodeValue(typeMap, d.oid, pgtype.TextFormatCode, data)
 	}
@@ -23,8 +23,8 @@ func (d *TypeDecoder) Decode(typeMap *pgtype.Map, data []byte) (interface{}, err
 // Uses double-checked locking: fast path (RLock) for cache hits, slow path (Lock)
 // with double-check for cache misses.
 type DecoderCache struct {
-	cache map[uint32]*TypeDecoder
 	mu    sync.RWMutex
+	cache map[uint32]*TypeDecoder
 }
 
 // NewDecoderCache creates a new decoder cache pre-sized for common PostgreSQL types.

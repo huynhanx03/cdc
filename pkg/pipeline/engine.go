@@ -223,27 +223,26 @@ func (e *Engine) applyMiddleware(ev *models.Event) *models.Event {
 
 func (e *Engine) publishBatchWithRetry(subjectFunc func(*models.Event) string, batch []*models.Event) {
 	metrics.BatchSizeHistogram.WithLabelValues("producer").Observe(float64(len(batch)))
-
-	_, err := retry.Do[struct{}](context.Background(), retry.Config[struct{}]{
-		MaxAttempts:  3,
-		IsRetryable:  retry.IsRetryable,
-		Delay:        100 * time.Millisecond,
-		MaxDelay:     1 * time.Second,
-		BackoffMult:  2.0,
+	// retry 3 times with exponential backoff
+	if _, err := retry.Do(context.Background(), retry.Config{
+		MaxAttempts: 3,
+		IsRetryable: retry.IsRetryable,
+		Delay:       100 * time.Millisecond,
+		MaxDelay:    1 * time.Second,
+		BackoffMult: 2.0,
 		OnRetry: func(attempt uint, err error) {
 			slog.Warn("publish batch retry", "attempt", attempt, _nameErr, err)
 		},
 	}, func() (struct{}, error) {
 		return struct{}{}, e.natsClient.PublishBatch(context.Background(), subjectFunc, batch)
-	})
-
-	if err != nil {
+	}); err != nil {
 		slog.Error("failed to publish batch after retries", _nameErr, err)
 		for _, ev := range batch {
 			e.updateSourceStats(ev.InstanceID, false, err.Error())
 		}
 		return
 	}
+	// update stats for successful publish
 	for _, ev := range batch {
 		e.updateSourceStats(ev.InstanceID, true, "")
 	}
@@ -267,7 +266,7 @@ func (e *Engine) publishBatch(subjectFunc func(*models.Event) string, batch []*m
 func (e *Engine) startSinkWorkersUnlocked(sink interfaces.Sink) {
 	ctx, cancel := context.WithCancel(context.Background())
 	e.sinkCancels[sink.InstanceID()] = cancel
-	
+
 	wg := &sync.WaitGroup{}
 	if e.sinkWgs == nil {
 		e.sinkWgs = make(map[string]*sync.WaitGroup)
@@ -376,7 +375,7 @@ func (e *Engine) flushAndAck(sink interfaces.Sink, msgs []jetstream.Msg, events 
 	if len(events) == 0 {
 		return
 	}
-	
+
 	// Architectural safeguard: Deep clone events so downstream sinks can retain them safely
 	// without violating our internal memory pooling use-after-free constraints
 	clonedEvents := make([]*models.Event, len(events))

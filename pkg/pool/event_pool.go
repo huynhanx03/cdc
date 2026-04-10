@@ -8,7 +8,7 @@ import (
 
 var eventPool = sync.Pool{
 	New: func() any {
-		return &models.Event{}
+		return new(models.Event)
 	},
 }
 
@@ -19,14 +19,9 @@ func GetEvent() *models.Event {
 
 // PutEvent resets the Event fields and returns it to the pool.
 func PutEvent(ev *models.Event) {
-	ev.Topic = ""
-	ev.Subject = ""
-	ev.InstanceID = ""
-	ev.Schema = ""
-	ev.Table = ""
-	ev.Op = ""
-	ev.Offset = ""
-	ev.LSN = 0
-	ev.Data = nil
+	if ev == nil {
+		return
+	}
+	*ev = models.Event{}
 	eventPool.Put(ev)
 }
