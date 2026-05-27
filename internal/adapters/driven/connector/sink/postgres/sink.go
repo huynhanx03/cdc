@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/foden/cdc/config"
@@ -17,6 +18,8 @@ import (
 	"github.com/foden/cdc/internal/core/ports"
 	"github.com/foden/cdc/pkg/utils"
 )
+
+const postgresMaxParams = 60000
 
 func init() {
 	registry.RegisterSink(constant.SinkTypePostgres.String(), func(cfg *ports.SinkConfig) (ports.Sink, error) {
@@ -39,12 +42,12 @@ func New(cfg *ports.SinkConfig) (*PostgresSink, error) {
 
 	poolCfg, err := pgxpool.ParseConfig(connStr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse connection string: %w", err)
+		return nil, sinkcommon.PermanentError(sinkcommon.ReasonInvalidRecord, fmt.Errorf("failed to parse connection string: %w", err))
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to postgres: %w", err)
+		return nil, sinkcommon.ClassifySinkError(fmt.Errorf("failed to connect to postgres: %w", err))
 	}
 
 	sink := &PostgresSink{pool: pool, cfg: cfg}
@@ -53,18 +56,18 @@ func New(cfg *ports.SinkConfig) (*PostgresSink, error) {
 }
 
 // WriteBatch writes events to PostgreSQL in a single transaction.
-func (s *PostgresSink) WriteBatch(events []*domain.Event) error {
-	ctx := context.Background()
+func (s *PostgresSink) WriteBatch(ctx context.Context, events []*domain.Event) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin transaction failed: %w", err)
+		return sinkcommon.ClassifySinkError(fmt.Errorf("begin transaction failed: %w", err))
 	}
 	defer tx.Rollback(ctx)
 
+	groups := make(map[string]*postgresWriteGroup)
 	for _, event := range events {
 		data, ok, err := sinkcommon.RowMap(event)
 		if err != nil {
-			return err
+			return sinkcommon.PermanentError(sinkcommon.ReasonInvalidRecord, err)
 		}
 		if !ok {
 			continue
@@ -76,28 +79,65 @@ func (s *PostgresSink) WriteBatch(events []*domain.Event) error {
 			return err
 		}
 
-		pkValues, err := primaryKeyValues(data, meta.PrimaryKeys)
-		if err != nil {
-			return err
+		key := meta.Schema + "." + meta.Table
+		group := groups[key]
+		if group == nil {
+			group = &postgresWriteGroup{meta: meta}
+			groups[key] = group
 		}
-
 		switch event.Op {
 		case constant.OpDelete:
-			if _, err := tx.Exec(ctx, meta.DeleteSQL, pkValues...); err != nil {
-				return fmt.Errorf("delete failed: %w", err)
+			if _, err := primaryKeyValues(data, meta.PrimaryKeys); err != nil {
+				return err
 			}
+			group.deletes = append(group.deletes, data)
 		case constant.OpCreate, constant.OpUpdate, constant.OpSnapshot:
-			values := valuesForColumns(data, meta.Columns)
-			if _, err := tx.Exec(ctx, meta.UpsertSQL, values...); err != nil {
-				return fmt.Errorf("upsert failed: %w", err)
-			}
+			group.upserts = append(group.upserts, data)
 		default:
 			slog.Warn("unknown operation type", "op", event.Op)
 		}
 	}
 
+	for _, group := range groups {
+		if err := execPostgresBulk(ctx, tx, group); err != nil {
+			return err
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit transaction failed: %w", err)
+		return sinkcommon.ClassifySinkError(fmt.Errorf("commit transaction failed: %w", err))
+	}
+	return nil
+}
+
+type postgresExec interface {
+	Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error)
+}
+
+type postgresWriteGroup struct {
+	meta    sinkcommon.TableMetadata
+	upserts []map[string]interface{}
+	deletes []map[string]interface{}
+}
+
+func execPostgresBulk(ctx context.Context, tx postgresExec, group *postgresWriteGroup) error {
+	meta := group.meta
+	upsertChunk := rowsPerChunk(len(meta.Columns), postgresMaxParams)
+	for _, rows := range chunkRows(group.upserts, upsertChunk) {
+		query := buildBulkUpsertSQLForRows(meta.Schema+"."+meta.Table, meta.PrimaryKeys, meta.Columns, len(rows))
+		args := valuesForRows(rows, meta.Columns)
+		if _, err := tx.Exec(ctx, query, args...); err != nil {
+			return sinkcommon.ClassifySinkError(fmt.Errorf("bulk upsert failed: %w", err))
+		}
+	}
+
+	deleteChunk := rowsPerChunk(len(meta.PrimaryKeys), postgresMaxParams)
+	for _, rows := range chunkRows(group.deletes, deleteChunk) {
+		query := buildBulkDeleteSQLForRows(meta.Schema+"."+meta.Table, meta.PrimaryKeys, len(rows))
+		args := valuesForRows(rows, meta.PrimaryKeys)
+		if _, err := tx.Exec(ctx, query, args...); err != nil {
+			return sinkcommon.ClassifySinkError(fmt.Errorf("bulk delete failed: %w", err))
+		}
 	}
 	return nil
 }
@@ -121,10 +161,10 @@ func (s *PostgresSink) metadataForTable(ctx context.Context, schema, table strin
 	meta.Schema = base.Schema
 	meta.Table = base.Table
 	if len(meta.Columns) == 0 {
-		return sinkcommon.TableMetadata{}, fmt.Errorf("postgres sink table %s has no columns or does not exist", key)
+		return sinkcommon.TableMetadata{}, sinkcommon.PermanentError(sinkcommon.ReasonMissingMetadata, fmt.Errorf("postgres sink table %s has no columns or does not exist", key))
 	}
 	if len(meta.PrimaryKeys) == 0 {
-		return sinkcommon.TableMetadata{}, fmt.Errorf("postgres sink table %s has no primary key", key)
+		return sinkcommon.TableMetadata{}, sinkcommon.PermanentError(sinkcommon.ReasonMissingMetadata, fmt.Errorf("postgres sink table %s has no primary key", key))
 	}
 	qualifiedTable := key
 	meta.UpsertSQL = buildUpsertSQLForColumns(qualifiedTable, meta.PrimaryKeys, meta.Columns)
@@ -152,7 +192,7 @@ FROM information_schema.columns
 WHERE table_schema = $1 AND table_name = $2
 ORDER BY ordinal_position`, schema, table)
 	if err != nil {
-		return nil, fmt.Errorf("query postgres columns for %s.%s: %w", schema, table, err)
+		return nil, sinkcommon.ClassifySinkError(fmt.Errorf("query postgres columns for %s.%s: %w", schema, table, err))
 	}
 	defer rows.Close()
 
@@ -183,7 +223,7 @@ WHERE tc.constraint_type = 'PRIMARY KEY'
   AND tc.table_name = $2
 ORDER BY kcu.ordinal_position`, schema, table)
 	if err != nil {
-		return nil, fmt.Errorf("query postgres primary keys for %s.%s: %w", schema, table, err)
+		return nil, sinkcommon.ClassifySinkError(fmt.Errorf("query postgres primary keys for %s.%s: %w", schema, table, err))
 	}
 	defer rows.Close()
 
@@ -202,11 +242,13 @@ ORDER BY kcu.ordinal_position`, schema, table)
 }
 
 func buildUpsertSQLForColumns(table string, primaryKeys []string, cols []string) string {
+	return buildBulkUpsertSQLForRows(table, primaryKeys, cols, 1)
+}
+
+func buildBulkUpsertSQLForRows(table string, primaryKeys []string, cols []string, rowCount int) string {
 	pkSet := makeStringSet(primaryKeys)
-	placeholders := make([]string, 0, len(cols))
 	updates := make([]string, 0, len(cols)-1)
-	for i, col := range cols {
-		placeholders = append(placeholders, fmt.Sprintf("$%d", i+1))
+	for _, col := range cols {
 		if !pkSet[col] {
 			quoted := utils.QuoteIdentifierDoubleQuote(col)
 			updates = append(updates, fmt.Sprintf("%s = EXCLUDED.%s", quoted, quoted))
@@ -218,15 +260,29 @@ func buildUpsertSQLForColumns(table string, primaryKeys []string, cols []string)
 	}
 
 	query := fmt.Sprintf(
-		"INSERT INTO %s (%s) VALUES (%s) ON CONFLICT (%s) DO UPDATE SET %s",
+		"INSERT INTO %s (%s) VALUES %s ON CONFLICT (%s) DO UPDATE SET %s",
 		utils.QuoteIdentifierDoubleQuote(table),
 		quotePostgresIdentifiers(cols),
-		strings.Join(placeholders, ", "),
+		postgresValuePlaceholders(rowCount, len(cols), 1),
 		quotePostgresIdentifiers(primaryKeys),
 		strings.Join(updates, ", "),
 	)
 
 	return query
+}
+
+func postgresValuePlaceholders(rowCount, colCount, start int) string {
+	rows := make([]string, 0, rowCount)
+	arg := start
+	for i := 0; i < rowCount; i++ {
+		cols := make([]string, 0, colCount)
+		for j := 0; j < colCount; j++ {
+			cols = append(cols, fmt.Sprintf("$%d", arg))
+			arg++
+		}
+		rows = append(rows, fmt.Sprintf("(%s)", strings.Join(cols, ", ")))
+	}
+	return strings.Join(rows, ", ")
 }
 
 func quotePostgresIdentifiers(cols []string) string {
@@ -238,6 +294,19 @@ func quotePostgresIdentifiers(cols []string) string {
 }
 
 func buildDeleteSQL(table string, primaryKeys []string) string {
+	return buildBulkDeleteSQLForRows(table, primaryKeys, 1)
+}
+
+func buildBulkDeleteSQLForRows(table string, primaryKeys []string, rowCount int) string {
+	if rowCount <= 1 {
+		return buildSingleDeleteSQL(table, primaryKeys)
+	}
+	quotedPKs := quotePostgresIdentifiers(primaryKeys)
+	values := postgresValuePlaceholders(rowCount, len(primaryKeys), 1)
+	return fmt.Sprintf("DELETE FROM %s WHERE (%s) IN (%s)", utils.QuoteIdentifierDoubleQuote(table), quotedPKs, values)
+}
+
+func buildSingleDeleteSQL(table string, primaryKeys []string) string {
 	clauses := make([]string, 0, len(primaryKeys))
 	for i, pk := range primaryKeys {
 		clauses = append(clauses, fmt.Sprintf("%s = $%d", utils.QuoteIdentifierDoubleQuote(pk), i+1))
@@ -258,7 +327,7 @@ func primaryKeyValues(row map[string]interface{}, primaryKeys []string) ([]inter
 	for _, key := range primaryKeys {
 		value, ok := row[key]
 		if !ok || value == nil || value == "" {
-			return nil, fmt.Errorf("missing primary key column %q", key)
+			return nil, sinkcommon.PermanentError(sinkcommon.ReasonInvalidRecord, fmt.Errorf("missing primary key column %q", key))
 		}
 		values = append(values, value)
 	}
@@ -266,6 +335,49 @@ func primaryKeyValues(row map[string]interface{}, primaryKeys []string) ([]inter
 }
 
 func valuesForColumns(row map[string]interface{}, columns []string) []interface{} {
+	return valuesForRows([]map[string]interface{}{row}, columns)
+}
+
+func valuesForRows(rows []map[string]interface{}, columns []string) []interface{} {
+	values := make([]interface{}, 0, len(rows)*len(columns))
+	for _, row := range rows {
+		for _, column := range columns {
+			values = append(values, row[column])
+		}
+	}
+	return values
+}
+
+func rowsPerChunk(columnCount, maxParams int) int {
+	if columnCount <= 0 {
+		return 1
+	}
+	rows := maxParams / columnCount
+	if rows < 1 {
+		return 1
+	}
+	return rows
+}
+
+func chunkRows(rows []map[string]interface{}, size int) [][]map[string]interface{} {
+	if len(rows) == 0 {
+		return nil
+	}
+	if size <= 0 || size >= len(rows) {
+		return [][]map[string]interface{}{rows}
+	}
+	chunks := make([][]map[string]interface{}, 0, (len(rows)+size-1)/size)
+	for start := 0; start < len(rows); start += size {
+		end := start + size
+		if end > len(rows) {
+			end = len(rows)
+		}
+		chunks = append(chunks, rows[start:end])
+	}
+	return chunks
+}
+
+func valuesForColumnsLegacy(row map[string]interface{}, columns []string) []interface{} {
 	values := make([]interface{}, 0, len(columns))
 	for _, column := range columns {
 		values = append(values, row[column])

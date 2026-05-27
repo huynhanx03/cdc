@@ -23,7 +23,7 @@ import (
 // FlowSink is the minimal sink interface needed by flow workers.
 // This avoids a circular dependency with the interfaces package.
 type FlowSink interface {
-	WriteBatch(events []*domain.Event) error
+	WriteBatch(ctx context.Context, events []*domain.Event) error
 	Close() error
 	InstanceID() string
 }
@@ -191,6 +191,9 @@ func (m *Manager) CreateFlow(ctx context.Context, cfg *ports.FlowConfig) (*ports
 	cfg.SinkID = strings.TrimSpace(cfg.SinkID)
 	cfg.SourceTable = strings.TrimSpace(cfg.SourceTable)
 	cfg.SinkTable = strings.TrimSpace(cfg.SinkTable)
+	if err := validateFlowFilter(cfg); err != nil {
+		return nil, err
+	}
 
 	// Validate source_id exists
 	srcCfg, err := m.store.GetSource(ctx, cfg.SourceID)
@@ -198,7 +201,7 @@ func (m *Manager) CreateFlow(ctx context.Context, cfg *ports.FlowConfig) (*ports
 		return nil, fmt.Errorf("failed to look up source: %w", err)
 	}
 	if srcCfg == nil {
-		return nil, fmt.Errorf("source %q not found", cfg.SourceID)
+		return nil, fmt.Errorf("%w: source %q not found", cdcerrors.ErrValidation, cfg.SourceID)
 	}
 
 	// Validate sink_id exists
@@ -207,7 +210,7 @@ func (m *Manager) CreateFlow(ctx context.Context, cfg *ports.FlowConfig) (*ports
 		return nil, fmt.Errorf("failed to look up sink: %w", err)
 	}
 	if sinkCfg == nil {
-		return nil, fmt.Errorf("sink %q not found", cfg.SinkID)
+		return nil, fmt.Errorf("%w: sink %q not found", cdcerrors.ErrValidation, cfg.SinkID)
 	}
 	if strings.TrimSpace(cfg.Name) == "" {
 		cfg.Name = GenerateFlowName(srcCfg, sinkCfg, cfg.SourceTable, cfg.SinkTable)
@@ -361,6 +364,16 @@ func normalizeFlowToken(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
 }
 
+func validateFlowFilter(cfg *ports.FlowConfig) error {
+	if cfg == nil || cfg.Options == nil || strings.TrimSpace(cfg.Options.FilterExpression) == "" {
+		return nil
+	}
+	if _, err := NewFilter(cfg.Options.FilterExpression); err != nil {
+		return fmt.Errorf("%w: invalid filter expression: %v", cdcerrors.ErrValidation, err)
+	}
+	return nil
+}
+
 // GetFlow retrieves a single flow config from the store.
 func (m *Manager) GetFlow(ctx context.Context, flowID string) (*ports.FlowConfig, error) {
 	if flowID == "" {
@@ -412,6 +425,9 @@ func (m *Manager) UpdateFlow(ctx context.Context, cfg *ports.FlowConfig) (*ports
 	}
 	if cfg.Options != nil {
 		existing.Options = cfg.Options
+	}
+	if err := validateFlowFilter(existing); err != nil {
+		return nil, err
 	}
 	if err := m.validateUniqueFlowMapping(ctx, existing.FlowID, existing.SourceID, existing.SinkID, existing.SourceTable, existing.SinkTable); err != nil {
 		return nil, err
@@ -562,6 +578,10 @@ func (m *Manager) DeleteFlow(ctx context.Context, flowID string) error {
 
 	// Release shared sink connection
 	m.sinkPool.Release(flow.SinkID)
+
+	if err := m.natsClient.DeleteConsumer(ctx, flowConsumerName(flowID)); err != nil {
+		return fmt.Errorf("failed to delete flow consumer: %w", err)
+	}
 
 	// Delete from store
 	if err := m.store.DeleteFlow(ctx, flowID); err != nil {
@@ -1000,8 +1020,8 @@ type sinkAdapter struct {
 	sink ports.Sink
 }
 
-func (a *sinkAdapter) WriteBatch(events []*domain.Event) error {
-	return a.sink.WriteBatch(events)
+func (a *sinkAdapter) WriteBatch(ctx context.Context, events []*domain.Event) error {
+	return a.sink.WriteBatch(ctx, events)
 }
 
 func (a *sinkAdapter) Close() error {

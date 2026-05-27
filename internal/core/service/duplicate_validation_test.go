@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/foden/cdc/internal/core/domain"
 	"github.com/foden/cdc/internal/core/dto/request"
 	"github.com/foden/cdc/internal/core/ports"
 )
@@ -82,6 +83,12 @@ func (s *serviceTestStore) SaveOffset(context.Context, string, string) error {
 }
 func (s *serviceTestStore) GetOffset(context.Context, string) (string, error) {
 	return "", nil
+}
+func (s *serviceTestStore) SaveCheckpoint(context.Context, *domain.Checkpoint) error {
+	return nil
+}
+func (s *serviceTestStore) GetCheckpoint(context.Context, string) (*domain.Checkpoint, error) {
+	return nil, nil
 }
 func (s *serviceTestStore) SaveSourceOffset(context.Context, string, string) error {
 	return nil

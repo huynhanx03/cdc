@@ -1,6 +1,10 @@
 package ports
 
-import "github.com/foden/cdc/internal/core/domain"
+import (
+	"context"
+
+	"github.com/foden/cdc/internal/core/domain"
+)
 
 // Sink defines a connection to a destination that receives replicated data.
 // Implementations are responsible for:
@@ -13,7 +17,7 @@ import "github.com/foden/cdc/internal/core/domain"
 type Sink interface {
 	// WriteBatch writes a batch of events to the destination.
 	// Implementations should be idempotent — duplicate events must not cause errors.
-	WriteBatch(events []*domain.Event) error
+	WriteBatch(ctx context.Context, events []*domain.Event) error
 
 	// Close gracefully shuts down the sink, flushing pending writes.
 	Close() error

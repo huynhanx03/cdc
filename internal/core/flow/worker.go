@@ -3,6 +3,7 @@ package flow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/bytedance/sonic"
 
+	sinkcommon "github.com/foden/cdc/internal/adapters/driven/connector/sink/common"
 	"github.com/foden/cdc/internal/adapters/driven/metrics"
 	"github.com/foden/cdc/internal/core/constant"
 	"github.com/foden/cdc/internal/core/domain"
@@ -146,9 +148,7 @@ func (w *FlowWorker) run(ctx context.Context) {
 	// Parse source_table to get schema.table
 	schema, table := parseSourceTable(w.flow.SourceTable)
 
-	// Build filter subject: cdc.<source_id>.<schema>.<table>.*
-	// This matches all partitions for the specific source table.
-	filterSubject := fmt.Sprintf("cdc.%s.%s.%s.*", w.flow.SourceID, schema, table)
+	filterSubject := CDCFilterSubject(w.flow.SourceID, schema, table)
 	consumerName := flowConsumerName(w.flow.FlowID)
 
 	consumer, err := w.natsClient.CreateOrUpdateConsumer(ctx, consumerName, []string{filterSubject})
@@ -187,6 +187,21 @@ func (w *FlowWorker) run(ctx context.Context) {
 		default:
 		}
 
+		if w.pool.Free() <= 0 {
+			if w.runtimeMetrics != nil {
+				w.runtimeMetrics.RecordBackpressure(w.flow.FlowID, 1)
+			}
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+
+		select {
+		case <-ctx.Done():
+			w.log.Info("worker stopping before fetch")
+			return
+		default:
+		}
+
 		// Fetch a batch of messages from the NATS consumer
 		msgBatch, err := consumer.Fetch(batchSize, jetstream.FetchMaxWait(flushInterval))
 		if err != nil {
@@ -206,6 +221,15 @@ func (w *FlowWorker) run(ctx context.Context) {
 
 		if len(msgs) == 0 {
 			continue
+		}
+
+		select {
+		case <-ctx.Done():
+			for _, msg := range msgs {
+				_ = msg.Nak()
+			}
+			return
+		default:
 		}
 
 		// Submit batch processing as a task to the ants pool
@@ -241,15 +265,28 @@ func (w *FlowWorker) processBatch(ctx context.Context, msgs []jetstream.Msg) {
 		// Extract event metadata from NATS headers (zero-unmarshal pattern)
 		ev := w.parseEventFromMsg(msg)
 
-		// Apply filter — skip events that don't match
-		if w.filter != nil && !w.filter.Evaluate(ev.Data) {
-			// Event filtered out — ACK it (consumed but not written)
-			if w.runtimeMetrics != nil {
-				w.runtimeMetrics.RecordFlowFiltered(w.flow.FlowID, 1)
+		if w.filter != nil {
+			passed, err := w.filter.Evaluate(ev)
+			if err != nil {
+				w.log.Warn("filter failed, moving event to DLQ",
+					"err", err,
+					"offset", ev.Offset)
+				if dlqErr := w.moveToDLQ(ctx, msg, ev, cdcerrors.DLQErrorFilter, fmt.Sprintf("filter_error: %s", err.Error()), 0); dlqErr != nil {
+					w.log.Error("failed to move filter error to DLQ", "err", dlqErr, "offset", ev.Offset)
+					_ = msg.Nak()
+				}
+				pool.PutEvent(ev)
+				continue
 			}
-			_ = msg.Ack()
-			pool.PutEvent(ev)
-			continue
+			if !passed {
+				// Event filtered out — ACK it (consumed but not written)
+				if w.runtimeMetrics != nil {
+					w.runtimeMetrics.RecordFlowFiltered(w.flow.FlowID, 1)
+				}
+				_ = msg.Ack()
+				pool.PutEvent(ev)
+				continue
+			}
 		}
 
 		// Apply column mapping to event data
@@ -269,12 +306,7 @@ func (w *FlowWorker) processBatch(ctx context.Context, msgs []jetstream.Msg) {
 						1,
 					)
 				}
-				if dlqErr := w.natsClient.MoveToDLQ(ctx, msg, ports.DLQMoveOptions{
-					FlowID:     w.flow.FlowID,
-					SinkID:     w.flow.SinkID,
-					Reason:     fmt.Sprintf("mapping_error: %s", err.Error()),
-					ErrorClass: cdcerrors.DLQErrorMapping,
-				}); dlqErr != nil {
+				if dlqErr := w.moveToDLQ(ctx, msg, ev, cdcerrors.DLQErrorMapping, fmt.Sprintf("mapping_error: %s", err.Error()), 0); dlqErr != nil {
 					w.log.Error("failed to move mapping error to DLQ", "err", dlqErr, "offset", ev.Offset)
 					_ = msg.Nak()
 				} else if w.runtimeMetrics != nil {
@@ -296,35 +328,51 @@ func (w *FlowWorker) processBatch(ctx context.Context, msgs []jetstream.Msg) {
 		return
 	}
 
-	// Write batch to sink with duration measurement
 	start := time.Now()
-	err := retry.Do(ctx, retry.DefaultConfig(), func() error {
-		return w.sink.WriteBatch(events)
-	})
+	result := w.writeBatchWithIsolation(ctx, events, passedMsgs)
 	duration := time.Since(start)
 	metrics.SinkWriteDuration.WithLabelValues(w.sink.InstanceID(), "").Observe(duration.Seconds())
 
-	if err != nil {
+	if len(result.retryMsgs) > 0 || len(result.dlqMsgs) > 0 {
 		w.log.Error("sink write failed",
 			"batch_size", len(events),
-			"err", err)
-		metrics.FlowEventsProcessed.WithLabelValues(w.flow.FlowID, "failure").Add(float64(len(events)))
+			"err", result.err)
+		failedCount := len(result.retryMsgs) + len(result.dlqMsgs)
+		metrics.FlowEventsProcessed.WithLabelValues(w.flow.FlowID, "failure").Add(float64(failedCount))
 		if w.runtimeMetrics != nil {
 			w.runtimeMetrics.RecordFlowFailure(
 				w.flow.FlowID,
 				w.flow.SourceID,
 				w.flow.SinkID,
 				"sink_write_failed",
-				err.Error(),
-				uint64(len(events)),
+				result.err.Error(),
+				uint64(failedCount),
 			)
 		}
-		w.handleFailure(ctx, passedMsgs)
+		if len(result.retryMsgs) > 0 {
+			w.handleFailure(ctx, result.retryMsgs, result.retryEvents, result.err)
+		}
+		for i, msg := range result.dlqMsgs {
+			var ev *domain.Event
+			if i < len(result.dlqEvents) {
+				ev = result.dlqEvents[i]
+			}
+			if dlqErr := w.moveToDLQ(ctx, msg, ev, cdcerrors.DLQErrorSink, result.err.Error(), deliveryCount(msg)); dlqErr != nil {
+				w.log.Error("failed to move isolated sink error to DLQ", "err", dlqErr)
+				_ = msg.Nak()
+			} else if w.runtimeMetrics != nil {
+				w.runtimeMetrics.RecordDLQ(w.flow.FlowID, w.flow.SinkID, "isolated_sink_error", 1)
+			}
+		}
 		// Return original events to pool
 		for _, ev := range poolEvents {
 			pool.PutEvent(ev)
 		}
-		return
+		events = result.successEvents
+		passedMsgs = result.successMsgs
+		if len(events) == 0 {
+			return
+		}
 	}
 
 	// Record per-flow metrics
@@ -344,19 +392,45 @@ func (w *FlowWorker) processBatch(ctx context.Context, msgs []jetstream.Msg) {
 		)
 	}
 
-	// Success: ACK all messages
-	for _, msg := range passedMsgs {
-		_ = msg.Ack()
-	}
-
-	// Save offset checkpoint (use the last event's offset)
+	// Save checkpoint after sink success and before ACK.
 	lastEvent := events[len(events)-1]
 	if lastEvent.Offset != "" {
-		if err := w.store.SaveOffset(ctx, w.flow.FlowID, lastEvent.Offset); err != nil {
-			w.log.Warn("failed to save offset",
+		checkpoint := &domain.Checkpoint{
+			FlowID:      w.flow.FlowID,
+			SourceID:    w.flow.SourceID,
+			Position:    lastEvent.Offset,
+			LastEventID: lastEvent.MessageID,
+		}
+		if err := w.store.SaveCheckpoint(ctx, checkpoint); err != nil {
+			w.log.Error("failed to save checkpoint",
 				"offset", lastEvent.Offset,
 				"err", err)
+			if w.runtimeMetrics != nil {
+				w.runtimeMetrics.RecordFlowFailure(
+					w.flow.FlowID,
+					w.flow.SourceID,
+					w.flow.SinkID,
+					"checkpoint_save_failed",
+					err.Error(),
+					uint64(len(events)),
+				)
+			}
+			for _, ev := range poolEvents {
+				pool.PutEvent(ev)
+			}
+			return
 		}
+		if w.runtimeMetrics != nil {
+			w.runtimeMetrics.RecordCheckpointSave(w.flow.FlowID, 1)
+		}
+		if err := w.store.SaveOffset(ctx, w.flow.FlowID, lastEvent.Offset); err != nil {
+			w.log.Warn("failed to save legacy offset", "offset", lastEvent.Offset, "err", err)
+		}
+	}
+
+	// Success: ACK all messages after checkpoint is durable.
+	for _, msg := range passedMsgs {
+		_ = msg.Ack()
 	}
 
 	w.log.Debug("batch processed",
@@ -367,6 +441,83 @@ func (w *FlowWorker) processBatch(ctx context.Context, msgs []jetstream.Msg) {
 	for _, ev := range poolEvents {
 		pool.PutEvent(ev)
 	}
+}
+
+type sinkWriteResult struct {
+	successEvents []*domain.Event
+	successMsgs   []jetstream.Msg
+	retryEvents   []*domain.Event
+	retryMsgs     []jetstream.Msg
+	dlqEvents     []*domain.Event
+	dlqMsgs       []jetstream.Msg
+	err           error
+}
+
+func (w *FlowWorker) writeBatchWithIsolation(ctx context.Context, events []*domain.Event, msgs []jetstream.Msg) sinkWriteResult {
+	result := sinkWriteResult{err: nil}
+	w.writeBatchSegment(ctx, events, msgs, &result)
+	return result
+}
+
+func (w *FlowWorker) writeBatchSegment(ctx context.Context, events []*domain.Event, msgs []jetstream.Msg, result *sinkWriteResult) {
+	if len(events) == 0 {
+		return
+	}
+	classifiedErr := w.writeBatchWithRetry(ctx, events)
+	if classifiedErr == nil {
+		result.successEvents = append(result.successEvents, events...)
+		result.successMsgs = append(result.successMsgs, msgs...)
+		return
+	}
+	result.err = classifiedErr
+	var sinkErr *sinkcommon.SinkError
+	if !errors.As(classifiedErr, &sinkErr) || sinkErr.Retryable {
+		result.retryEvents = append(result.retryEvents, events...)
+		result.retryMsgs = append(result.retryMsgs, msgs...)
+		return
+	}
+	if len(events) == 1 {
+		result.dlqEvents = append(result.dlqEvents, events...)
+		result.dlqMsgs = append(result.dlqMsgs, msgs...)
+		return
+	}
+	mid := len(events) / 2
+	w.writeBatchSegment(ctx, events[:mid], msgs[:mid], result)
+	w.writeBatchSegment(ctx, events[mid:], msgs[mid:], result)
+}
+
+func (w *FlowWorker) writeBatchWithRetry(ctx context.Context, events []*domain.Event) error {
+	var classifiedErr error
+	err := retry.Do(ctx, retry.DefaultConfig(), func() error {
+		writeErr := w.sink.WriteBatch(ctx, events)
+		if writeErr == nil {
+			return nil
+		}
+		classifiedErr = sinkcommon.ClassifySinkError(writeErr)
+		var sinkErr *sinkcommon.SinkError
+		if errors.As(classifiedErr, &sinkErr) && !sinkErr.Retryable {
+			return cdcerrors.Permanent(classifiedErr)
+		}
+		return classifiedErr
+	})
+	if err == nil {
+		return nil
+	}
+	if classifiedErr == nil {
+		return err
+	}
+	return classifiedErr
+}
+
+func deliveryCount(msg jetstream.Msg) uint64 {
+	if msg == nil {
+		return 0
+	}
+	meta, err := msg.Metadata()
+	if err != nil || meta == nil {
+		return 0
+	}
+	return meta.NumDelivered
 }
 
 func applySinkTable(event *domain.Event, sinkTable string) {
@@ -380,8 +531,15 @@ func applySinkTable(event *domain.Event, sinkTable string) {
 
 // handleFailure handles batch write failures by NAKing messages or routing to DLQ
 // if max retries have been exceeded.
-func (w *FlowWorker) handleFailure(ctx context.Context, msgs []jetstream.Msg) {
-	for _, msg := range msgs {
+func (w *FlowWorker) handleFailure(ctx context.Context, msgs []jetstream.Msg, batchEvents []*domain.Event, failureErr error) {
+	var sinkErr *sinkcommon.SinkError
+	nonRetryable := errors.As(failureErr, &sinkErr) && !sinkErr.Retryable
+
+	for i, msg := range msgs {
+		var ev *domain.Event
+		if i < len(batchEvents) {
+			ev = batchEvents[i]
+		}
 		// Check delivery count from message metadata
 		metadata, err := msg.Metadata()
 		if err != nil {
@@ -390,24 +548,28 @@ func (w *FlowWorker) handleFailure(ctx context.Context, msgs []jetstream.Msg) {
 			continue
 		}
 
-		if int(metadata.NumDelivered) >= w.maxDeliver {
+		if nonRetryable || int(metadata.NumDelivered) >= w.maxDeliver {
 			// Max retries exceeded — route to DLQ
 			reason := fmt.Sprintf("max deliveries (%d) exceeded for flow %s", w.maxDeliver, w.flow.FlowID)
-			if dlqErr := w.natsClient.MoveToDLQ(ctx, msg, ports.DLQMoveOptions{
-				FlowID:     w.flow.FlowID,
-				SinkID:     w.flow.SinkID,
-				Reason:     reason,
-				ErrorClass: cdcerrors.DLQErrorSink,
-			}); dlqErr != nil {
+			metricReason := "max_retries_exceeded"
+			if nonRetryable {
+				reason = failureErr.Error()
+				if sinkErr != nil && sinkErr.Reason != "" {
+					metricReason = sinkErr.Reason
+				} else {
+					metricReason = "non_retryable"
+				}
+			}
+			if dlqErr := w.moveToDLQ(ctx, msg, ev, cdcerrors.DLQErrorSink, reason, metadata.NumDelivered); dlqErr != nil {
 				w.log.Error("failed to move message to DLQ",
 					"err", dlqErr,
 					"delivery_count", metadata.NumDelivered)
 				// Last resort: NAK so it's not lost
 				_ = msg.Nak()
 			} else {
-				metrics.DLQEventsTotal.WithLabelValues(w.flow.FlowID, "max_retries_exceeded").Inc()
+				metrics.DLQEventsTotal.WithLabelValues(w.flow.FlowID, metricReason).Inc()
 				if w.runtimeMetrics != nil {
-					w.runtimeMetrics.RecordDLQ(w.flow.FlowID, w.flow.SinkID, "max_retries_exceeded", 1)
+					w.runtimeMetrics.RecordDLQ(w.flow.FlowID, w.flow.SinkID, metricReason, 1)
 				}
 				w.log.Warn("message moved to DLQ",
 					"delivery_count", metadata.NumDelivered,
@@ -415,9 +577,31 @@ func (w *FlowWorker) handleFailure(ctx context.Context, msgs []jetstream.Msg) {
 			}
 		} else {
 			// NAK for retry
+			if w.runtimeMetrics != nil {
+				w.runtimeMetrics.RecordRetry(w.flow.FlowID, w.flow.SinkID, "sink_retry", 1)
+			}
 			_ = msg.Nak()
 		}
 	}
+}
+
+func (w *FlowWorker) moveToDLQ(ctx context.Context, msg jetstream.Msg, ev *domain.Event, errorClass string, reason string, retryCount uint64) error {
+	opts := ports.DLQMoveOptions{
+		FlowID:     w.flow.FlowID,
+		SourceID:   w.flow.SourceID,
+		SinkID:     w.flow.SinkID,
+		Reason:     reason,
+		ErrorClass: errorClass,
+		RetryCount: retryCount,
+		Timestamp:  time.Now().UnixMilli(),
+	}
+	if ev != nil {
+		opts.Schema = ev.Schema
+		opts.Table = ev.Table
+		opts.Op = ev.Op.String()
+		opts.MsgID = ev.MessageID
+	}
+	return w.natsClient.MoveToDLQ(ctx, msg, opts)
 }
 
 func eventTimestampMs(ev *domain.Event) int64 {
@@ -455,6 +639,7 @@ func (w *FlowWorker) parseEventFromMsg(msg jetstream.Msg) *domain.Event {
 	ev.Table = headers.Get(constant.HeaderTable)
 	ev.Op = constant.Op(headers.Get(constant.HeaderOp))
 	ev.Data = msg.Data()
+	ev.MessageID = headers.Get("Nats-Msg-Id")
 
 	if lsnStr := headers.Get(constant.HeaderLSN); lsnStr != "" {
 		ev.LSN, _ = strconv.ParseUint(lsnStr, 10, 64)

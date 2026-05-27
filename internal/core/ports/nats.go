@@ -13,6 +13,7 @@ type NATSClient interface {
 	PublishBatch(ctx context.Context, subjectFunc func(*domain.Event) string, events []*domain.Event) error
 	// Consumer management
 	CreateOrUpdateConsumer(ctx context.Context, name string, filterSubjects []string) (jetstream.Consumer, error)
+	DeleteConsumer(ctx context.Context, name string) error
 	// DLQ
 	MoveToDLQ(ctx context.Context, msg jetstream.Msg, opts DLQMoveOptions) error
 	ReprocessDLQ(ctx context.Context) (int, error)
@@ -48,7 +49,14 @@ type NATSConsumerSummary struct {
 
 type DLQMoveOptions struct {
 	FlowID     string
+	SourceID   string
 	SinkID     string
+	Schema     string
+	Table      string
+	Op         string
+	MsgID      string
 	Reason     string
 	ErrorClass string
+	RetryCount uint64
+	Timestamp  int64
 }

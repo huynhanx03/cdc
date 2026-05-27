@@ -690,7 +690,6 @@ export function FlowWizard({ open, onOpenChange }: FlowWizardProps) {
                 <Input
                   value={flowName}
                   onChange={(e) => setFlowName(e.target.value)}
-                  placeholder={t("manager.flows.autoNameHint")}
                   className="h-11 font-mono text-sm"
                 />
               </div>

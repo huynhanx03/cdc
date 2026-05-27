@@ -18,6 +18,7 @@ import (
 	"github.com/foden/cdc/internal/adapters/driven/registry"
 	"github.com/foden/cdc/internal/core/constant"
 	"github.com/foden/cdc/internal/core/domain"
+	coreflow "github.com/foden/cdc/internal/core/flow"
 	"github.com/foden/cdc/internal/core/ports"
 	coreruntime "github.com/foden/cdc/internal/core/runtime"
 	"github.com/foden/cdc/pkg/retry"
@@ -169,7 +170,7 @@ func (p *PostgresSource) processTask(t *walTask) {
 	partitionID := p.calculatePartition(t)
 
 	// 5. Build Hierarchical Subject (5 levels)
-	subject := fmt.Sprintf("%s.%s.%s.%s.%d", topic, p.cfg.InstanceID, namespace, table, partitionID)
+	subject := coreflow.CDCSubject(p.cfg.InstanceID, namespace, table, strconv.Itoa(partitionID))
 
 	offset := ""
 	if t.op == constant.OpSnapshot {
@@ -287,11 +288,19 @@ func (p *PostgresSource) parseOid(val []byte, oid uint32) interface{} {
 	case 16: // bool
 		return len(val) == 1 && val[0] == 't'
 	case 20, 21, 23: // int8, int2, int4
-		i, _ := strconv.ParseInt(string(val), 10, 64)
+		i, err := strconv.ParseInt(string(val), 10, 64)
+		if err != nil {
+			return string(val)
+		}
 		return i
-	case 700, 701, 1700: // float4, float8, numeric
-		f, _ := strconv.ParseFloat(string(val), 64)
+	case 700, 701: // float4, float8
+		f, err := strconv.ParseFloat(string(val), 64)
+		if err != nil {
+			return string(val)
+		}
 		return f
+	case 1700: // numeric
+		return string(val)
 	case 114, 3802: // json, jsonb
 		return json.RawMessage(val)
 	default:

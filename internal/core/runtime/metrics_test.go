@@ -42,6 +42,43 @@ func TestMetricsRecordFailureAndDLQ(t *testing.T) {
 	}
 }
 
+func TestRuntimeMetricNamesCoverCoreSignals(t *testing.T) {
+	names := map[string]bool{}
+	for _, name := range RuntimeMetricNames() {
+		names[name] = true
+	}
+	for _, want := range []string{
+		"events_in_total",
+		"events_out_total",
+		"sink_write_duration_ms",
+		"checkpoint_save_total",
+		"retry_total",
+		"dlq_total",
+		"nats_pending",
+		"worker_backpressure_total",
+		"source_lag_ms",
+	} {
+		if !names[want] {
+			t.Fatalf("missing metric name %q", want)
+		}
+	}
+}
+
+func TestMetricsRecordCheckpointRetryBackpressure(t *testing.T) {
+	m := NewMetrics()
+	m.RecordCheckpointSave("flow-1", 1)
+	m.RecordRetry("flow-1", "sink-1", "timeout", 2)
+	m.RecordBackpressure("flow-1", 3)
+
+	flow, ok := m.FlowSnapshot("flow-1")
+	if !ok {
+		t.Fatal("expected flow snapshot")
+	}
+	if flow.CheckpointSaveCount != 1 || flow.RetryCount != 2 || flow.BackpressureCount != 3 {
+		t.Fatalf("flow snapshot = %#v", flow)
+	}
+}
+
 func TestMetricsRecordSourceProduced(t *testing.T) {
 	m := NewMetrics()
 	m.RecordSourceProduced("source-1", "public", "orders", 5, 1234)

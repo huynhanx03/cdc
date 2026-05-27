@@ -1,6 +1,10 @@
 package ports
 
-import "context"
+import (
+	"context"
+
+	"github.com/foden/cdc/internal/core/domain"
+)
 
 // Store abstracts the persistence layer (backed by NATS KV).
 type Store interface {
@@ -22,6 +26,8 @@ type Store interface {
 	// Offset
 	SaveOffset(ctx context.Context, flowID string, offset string) error
 	GetOffset(ctx context.Context, flowID string) (string, error)
+	SaveCheckpoint(ctx context.Context, checkpoint *domain.Checkpoint) error
+	GetCheckpoint(ctx context.Context, flowID string) (*domain.Checkpoint, error)
 	SaveSourceOffset(ctx context.Context, sourceID string, offset string) error
 	GetSourceOffset(ctx context.Context, sourceID string) (string, error)
 }

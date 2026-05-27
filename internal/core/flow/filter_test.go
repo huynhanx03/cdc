@@ -3,6 +3,9 @@ package flow
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/foden/cdc/internal/core/constant"
+	"github.com/foden/cdc/internal/core/domain"
 )
 
 func TestNewFilter_EmptyExpression(t *testing.T) {
@@ -30,13 +33,8 @@ func TestNewFilter_WhitespaceExpression(t *testing.T) {
 
 func TestNewFilter_InvalidSyntax(t *testing.T) {
 	cases := []string{
-		"op",
-		"op > c",
-		"op = c",
 		"== c",
 		"!= c",
-		`op == "c"`,
-		`table == "users"`,
 	}
 	for _, expr := range cases {
 		_, err := NewFilter(expr)
@@ -88,7 +86,8 @@ func TestNewFilter_CELInvalidExpression(t *testing.T) {
 func TestFilter_Evaluate_PassAll(t *testing.T) {
 	f, _ := NewFilter("")
 	data := []byte(`{"status": "active"}`)
-	if !f.Evaluate(data) {
+	got, err := f.Evaluate(filterEvent(data))
+	if err != nil || !got {
 		t.Error("empty filter should pass all events")
 	}
 }
@@ -96,21 +95,24 @@ func TestFilter_Evaluate_PassAll(t *testing.T) {
 func TestFilter_Evaluate_NilFilter(t *testing.T) {
 	var f *Filter
 	data := []byte(`{"status": "active"}`)
-	if !f.Evaluate(data) {
+	got, err := f.Evaluate(filterEvent(data))
+	if err != nil || !got {
 		t.Error("nil filter should pass all events")
 	}
 }
 
 func TestFilter_Evaluate_NilData(t *testing.T) {
 	f, _ := NewFilter(`data.status == "active"`)
-	if f.Evaluate(nil) {
+	got, err := f.Evaluate(nil)
+	if err == nil || got {
 		t.Error("nil data should not pass filter")
 	}
 }
 
 func TestFilter_Evaluate_EmptyData(t *testing.T) {
 	f, _ := NewFilter(`data.status == "active"`)
-	if f.Evaluate([]byte{}) {
+	got, err := f.Evaluate(filterEvent([]byte{}))
+	if err == nil || got {
 		t.Error("empty data should not pass filter")
 	}
 }
@@ -129,7 +131,10 @@ func TestFilter_Evaluate_StringEquality(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		got := f.Evaluate([]byte(tc.data))
+		got, err := f.Evaluate(filterEvent([]byte(tc.data)))
+		if err != nil {
+			t.Fatalf("Evaluate(%s) err = %v", tc.data, err)
+		}
 		if got != tc.want {
 			t.Errorf("Evaluate(%s) = %v, want %v", tc.data, got, tc.want)
 		}
@@ -150,7 +155,10 @@ func TestFilter_Evaluate_NumericComparison(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		got := f.Evaluate([]byte(tc.data))
+		got, err := f.Evaluate(filterEvent([]byte(tc.data)))
+		if err != nil {
+			t.Fatalf("Evaluate(%s) err = %v", tc.data, err)
+		}
 		if got != tc.want {
 			t.Errorf("Evaluate(%s) = %v, want %v", tc.data, got, tc.want)
 		}
@@ -169,7 +177,10 @@ func TestFilter_Evaluate_BooleanExpression(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		got := f.Evaluate([]byte(tc.data))
+		got, err := f.Evaluate(filterEvent([]byte(tc.data)))
+		if err != nil {
+			t.Fatalf("Evaluate(%s) err = %v", tc.data, err)
+		}
 		if got != tc.want {
 			t.Errorf("Evaluate(%s) = %v, want %v", tc.data, got, tc.want)
 		}
@@ -190,7 +201,10 @@ func TestFilter_Evaluate_ComplexExpression(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		got := f.Evaluate([]byte(tc.data))
+		got, err := f.Evaluate(filterEvent([]byte(tc.data)))
+		if err != nil {
+			t.Fatalf("Evaluate(%s) err = %v", tc.data, err)
+		}
 		if got != tc.want {
 			t.Errorf("Evaluate(%s) = %v, want %v", tc.data, got, tc.want)
 		}
@@ -199,7 +213,8 @@ func TestFilter_Evaluate_ComplexExpression(t *testing.T) {
 
 func TestFilter_Evaluate_InvalidJSON(t *testing.T) {
 	f, _ := NewFilter(`data.status == "active"`)
-	if f.Evaluate([]byte(`not json`)) {
+	got, err := f.Evaluate(filterEvent([]byte(`not json`)))
+	if err == nil || got {
 		t.Error("invalid JSON should not pass filter")
 	}
 }
@@ -216,7 +231,10 @@ func TestFilter_Evaluate_HasField(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		got := f.Evaluate([]byte(tc.data))
+		got, err := f.Evaluate(filterEvent([]byte(tc.data)))
+		if err != nil {
+			t.Fatalf("Evaluate(%s) err = %v", tc.data, err)
+		}
 		if got != tc.want {
 			t.Errorf("Evaluate(%s) = %v, want %v", tc.data, got, tc.want)
 		}
@@ -233,7 +251,31 @@ func TestFilter_Evaluate_WithEventData(t *testing.T) {
 	}
 	data, _ := json.Marshal(payload)
 
-	if !f.Evaluate(data) {
+	got, err := f.Evaluate(filterEvent(data))
+	if err != nil || !got {
 		t.Error("expected event with active status to pass filter")
 	}
+}
+
+func TestFilter_Evaluate_EnvelopeVariables(t *testing.T) {
+	f, err := NewFilter(`op == "c" && schema == "public" && table == "users" && after.id == 7`)
+	if err != nil {
+		t.Fatalf("NewFilter err = %v", err)
+	}
+	got, err := f.Evaluate(&domain.Event{
+		Schema: "public",
+		Table:  "users",
+		Op:     constant.OpCreate,
+		Data:   []byte(`{"op":"c","before":null,"after":{"id":7},"source":{"schema":"public","table":"users"}}`),
+	})
+	if err != nil {
+		t.Fatalf("Evaluate err = %v", err)
+	}
+	if !got {
+		t.Fatal("envelope variables did not pass")
+	}
+}
+
+func filterEvent(data []byte) *domain.Event {
+	return &domain.Event{Schema: "public", Table: "users", Op: constant.OpCreate, Data: data}
 }

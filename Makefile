@@ -1,13 +1,27 @@
 APP_NAME := cdc
 BIN_DIR := bin
-CONFIG_FILE := deploy/app/config.yaml
+CONFIG_FILE := config/config.yaml
+COMPOSE_FILE := deploy/docker-compose.yaml
 PROTO_DIR := proto
 PROTO_IMAGE_NAME := cdc-proto-gen
 PROTO_DOCKERFILE := $(PROTO_DIR)/Dockerfile
 
-.PHONY: all build run test tidy up down fix-perms clean gen-proto proto-lint proto-breaking .docker-check .proto-image fe-install fe-dev fe-build fe-lint
+.PHONY: all help build run test tidy up down fix-perms clean gen-proto proto-lint proto-breaking .docker-check .proto-image fe-install fe-dev fe-build fe-lint
 
 all: tidy build
+
+help:
+	@printf "%s\n" \
+		"Targets:" \
+		"  build       Build $(APP_NAME) binary" \
+		"  run         Build and run using $(CONFIG_FILE)" \
+		"  test        Run Go tests" \
+		"  tidy        Run go mod tidy" \
+		"  up          Start docker compose stack" \
+		"  down        Stop docker compose stack" \
+		"  fe-build    Build Vite frontend" \
+		"  fe-lint     Lint frontend" \
+		"  gen-proto   Generate protobuf code"
 
 build:
 	@mkdir -p $(BIN_DIR)
@@ -23,10 +37,10 @@ tidy:
 	go mod tidy
 
 up:
-	docker compose up -d
+	docker compose --project-directory . -f $(COMPOSE_FILE) up -d
 
 down:
-	docker compose down
+	docker compose --project-directory . -f $(COMPOSE_FILE) down
 
 fix-perms:
 	@echo "Fixing nats-data permissions..."

@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/bytedance/sonic"
+	"github.com/foden/cdc/internal/core/constant"
 	"github.com/foden/cdc/internal/core/ports"
 )
 
@@ -18,6 +19,23 @@ func ApplyColumnMappings(data []byte, mappings []ports.ColumnMapping) ([]byte, e
 	var payload map[string]interface{}
 	if err := sonic.Unmarshal(data, &payload); err != nil {
 		return nil, err
+	}
+
+	rowKey := "after"
+	if op, _ := payload["op"].(string); constant.Op(op) == constant.OpDelete {
+		rowKey = "before"
+	}
+	if row, ok := payload[rowKey].(map[string]interface{}); ok {
+		payload[rowKey] = applyColumnMappingsToRow(row, mappings)
+		return sonic.Marshal(payload)
+	}
+
+	return sonic.Marshal(applyColumnMappingsToRow(payload, mappings))
+}
+
+func applyColumnMappingsToRow(payload map[string]interface{}, mappings []ports.ColumnMapping) map[string]interface{} {
+	if payload == nil {
+		return nil
 	}
 
 	// Build lookup maps for O(1) access
@@ -52,7 +70,7 @@ func ApplyColumnMappings(data []byte, mappings []ports.ColumnMapping) ([]byte, e
 		result[key] = val
 	}
 
-	return sonic.Marshal(result)
+	return result
 }
 
 // AutoGenerateMappings generates column mappings by matching source and sink column

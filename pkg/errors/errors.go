@@ -25,6 +25,9 @@ var (
 	// ErrDuplicateConfig is returned when a source, sink, or flow would duplicate an existing config.
 	ErrDuplicateConfig = errors.New("duplicate config")
 
+	// ErrValidation is returned for actionable user input errors.
+	ErrValidation = errors.New("validation error")
+
 	// ErrNonRetryable wraps errors that should not be retried.
 	// Retry frameworks should check IsNonRetryable() and fail fast.
 	ErrNonRetryable = errors.New("non-retryable error")
@@ -32,6 +35,7 @@ var (
 
 const (
 	DLQErrorSink      = "sink_error"
+	DLQErrorFilter    = "filter_error"
 	DLQErrorMapping   = "mapping_error"
 	DLQErrorMalformed = "malformed_event"
 )

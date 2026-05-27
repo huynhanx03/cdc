@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ import (
 	"github.com/foden/cdc/internal/adapters/driven/registry"
 	"github.com/foden/cdc/internal/core/constant"
 	"github.com/foden/cdc/internal/core/domain"
+	coreflow "github.com/foden/cdc/internal/core/flow"
 	"github.com/foden/cdc/internal/core/ports"
 	coreruntime "github.com/foden/cdc/internal/core/runtime"
 	"github.com/foden/cdc/pkg/retry"
@@ -133,19 +135,8 @@ func (s *MySQLSource) Start(events chan<- *domain.Event, ackCh <-chan ports.Sour
 				}
 
 				var runErr error
-				if initialOffset != "" {
-					parts := strings.Split(initialOffset, ":")
-					if len(parts) == 2 {
-						pos, pErr := strconv.ParseUint(parts[1], 10, 32)
-						if pErr == nil {
-							mysqlPos := mysql.Position{Name: parts[0], Pos: uint32(pos)}
-							runErr = s.canal.RunFrom(mysqlPos)
-						} else {
-							runErr = s.canal.Run()
-						}
-					} else {
-						runErr = s.canal.Run()
-					}
+				if mysqlPos, ok := parseMySQLPositionOffset(initialOffset); ok {
+					runErr = s.canal.RunFrom(mysqlPos)
 				} else {
 					runErr = s.canal.Run()
 				}
@@ -195,6 +186,18 @@ func (s *MySQLSource) InstanceID() string {
 func (s *MySQLSource) SyncSourceTables(_ context.Context, tables []ports.SourceTableRef) error {
 	slog.Info("mysql source tables reconciled", "instance", s.cfg.InstanceID, "tables", len(tables))
 	return nil
+}
+
+func parseMySQLPositionOffset(offset string) (mysql.Position, bool) {
+	name, rawPos, ok := strings.Cut(offset, ":")
+	if !ok || name == "" || rawPos == "" {
+		return mysql.Position{}, false
+	}
+	pos, err := strconv.ParseUint(rawPos, 10, 32)
+	if err != nil {
+		return mysql.Position{}, false
+	}
+	return mysql.Position{Name: name, Pos: uint32(pos)}, true
 }
 
 func (s *MySQLSource) ackLoop(ackCh <-chan ports.SourceAck) {
@@ -332,7 +335,7 @@ func (s *MySQLSource) processTask(t *mysqlTask) {
 	partitionID := s.calculatePartition(t)
 
 	// Build Hierarchical Subject (5 levels): cdc.{instance_id}.{schema}.{table}.{partition_id}
-	subject := fmt.Sprintf("%s.%s.%s.%s.%d", topic, s.cfg.InstanceID, t.db, t.table.Name, partitionID)
+	subject := coreflow.CDCSubject(s.cfg.InstanceID, t.db, t.table.Name, strconv.Itoa(partitionID))
 
 	ev := sourcecommon.BuildEvent(
 		topic,
@@ -458,7 +461,58 @@ func (h *eventHandler) OnRotate(header *replication.EventHeader, rotateEvent *re
 }
 
 func (h *eventHandler) OnDDL(header *replication.EventHeader, nextPos mysql.Position, queryEvent *replication.QueryEvent) error {
+	op, schemaName, tableName, ok := parseDDLAffectedTable(string(queryEvent.Schema), string(queryEvent.Query))
+	if !ok {
+		return nil
+	}
+	return h.handleTableDDL(schemaName, tableName, op)
+}
+
+func (h *eventHandler) OnTableChanged(header *replication.EventHeader, schemaName string, tableName string) error {
+	return h.handleTableDDL(schemaName, tableName, "alter")
+}
+
+func (h *eventHandler) handleTableDDL(schemaName, tableName, op string) error {
+	if h == nil || h.source == nil || strings.TrimSpace(tableName) == "" {
+		return nil
+	}
+	if h.source.canal != nil {
+		h.source.canal.ClearTableCache([]byte(schemaName), []byte(tableName))
+	}
+	if _, active := h.source.runtimeRegistry.LookupTable(h.source.cfg.InstanceID, schemaName, tableName); !active {
+		return nil
+	}
+	switch op {
+	case "drop", "rename":
+		return fmt.Errorf("mysql DDL %s affects selected table %s.%s; flow must be reconciled", op, schemaName, tableName)
+	default:
+		slog.Info("mysql DDL invalidated selected table schema", "schema", schemaName, "table", tableName, "op", op)
+	}
 	return nil
+}
+
+var mysqlDDLTableRE = regexp.MustCompile(`(?i)^\s*(ALTER|DROP|RENAME)\s+TABLE\s+(?:IF\s+EXISTS\s+)?` + "`?" + `([a-zA-Z0-9_]+)` + "`?" + `(?:\.` + "`?" + `([a-zA-Z0-9_]+)` + "`?" + `)?`)
+
+func parseDDLAffectedTable(defaultSchema, query string) (op, schemaName, tableName string, ok bool) {
+	match := mysqlDDLTableRE.FindStringSubmatch(query)
+	if match == nil {
+		return "", "", "", false
+	}
+	op = strings.ToLower(match[1])
+	if op == "alter" {
+		op = "alter"
+	}
+	if match[3] != "" {
+		schemaName = match[2]
+		tableName = match[3]
+	} else {
+		schemaName = defaultSchema
+		tableName = match[2]
+	}
+	if schemaName == "" || tableName == "" {
+		return "", "", "", false
+	}
+	return op, schemaName, tableName, true
 }
 
 func (h *eventHandler) String() string {

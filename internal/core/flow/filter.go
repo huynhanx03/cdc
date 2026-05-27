@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/foden/cdc/internal/core/domain"
 	"github.com/google/cel-go/cel"
 )
 
@@ -42,6 +43,12 @@ func NewFilter(expression string) (*Filter, error) {
 func compileCEL(expr string) (cel.Program, error) {
 	env, err := cel.NewEnv(
 		cel.Variable("data", cel.MapType(cel.StringType, cel.DynType)),
+		cel.Variable("before", cel.DynType),
+		cel.Variable("after", cel.DynType),
+		cel.Variable("op", cel.StringType),
+		cel.Variable("source", cel.DynType),
+		cel.Variable("schema", cel.StringType),
+		cel.Variable("table", cel.StringType),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create CEL environment: %w", err)
@@ -64,43 +71,60 @@ func compileCEL(expr string) (cel.Program, error) {
 // Returns true if the event should pass through, false if it should be skipped.
 // A nil filter or empty expression always returns true (pass all).
 // If data is nil or empty, and a filter expression is set, returns false.
-func (f *Filter) Evaluate(data []byte) bool {
+func (f *Filter) Evaluate(event *domain.Event) (bool, error) {
 	if f == nil || f.program == nil {
-		return true
+		return true, nil
 	}
 
-	if len(data) == 0 {
-		return false
+	if event == nil || len(event.Data) == 0 {
+		return false, fmt.Errorf("filter: event data is empty")
 	}
 
-	return f.evaluateCEL(data)
+	return f.evaluateCEL(event)
 }
 
 // evaluateCEL evaluates the CEL program against JSON data.
-func (f *Filter) evaluateCEL(data []byte) bool {
+func (f *Filter) evaluateCEL(event *domain.Event) (bool, error) {
 	// Parse JSON data into a map
 	var dataMap map[string]interface{}
-	if err := json.Unmarshal(data, &dataMap); err != nil {
-		// If data can't be parsed as JSON, skip the event
-		return false
+	if err := json.Unmarshal(event.Data, &dataMap); err != nil {
+		return false, fmt.Errorf("filter: parse event JSON: %w", err)
 	}
 
 	// Evaluate the CEL expression
 	out, _, err := f.program.Eval(map[string]interface{}{
-		"data": dataMap,
+		"data":   dataMap,
+		"before": dataMap["before"],
+		"after":  dataMap["after"],
+		"op":     eventOp(event, dataMap),
+		"source": dataMap["source"],
+		"schema": event.Schema,
+		"table":  event.Table,
 	})
 	if err != nil {
-		// On evaluation error, skip the event
-		return false
+		if strings.Contains(err.Error(), "no such key") {
+			return false, nil
+		}
+		return false, fmt.Errorf("filter: CEL eval: %w", err)
 	}
 
 	// The result must be a boolean
 	result, ok := out.Value().(bool)
 	if !ok {
-		return false
+		return false, fmt.Errorf("filter: expression result is %T, want bool", out.Value())
 	}
 
-	return result
+	return result, nil
+}
+
+func eventOp(event *domain.Event, data map[string]interface{}) string {
+	if event != nil && event.Op != "" {
+		return event.Op.String()
+	}
+	if op, ok := data["op"].(string); ok {
+		return op
+	}
+	return ""
 }
 
 // Expression returns the original filter expression string.

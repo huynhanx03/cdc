@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/bytedance/sonic"
+	"github.com/foden/cdc/internal/core/domain"
 	"github.com/foden/cdc/internal/core/ports"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -264,6 +266,43 @@ func (s *NATSKVStore) GetOffset(ctx context.Context, flowID string) (string, err
 		return "", fmt.Errorf("storage: get offset for flow %q: %w", flowID, err)
 	}
 	return string(entry.Value()), nil
+}
+
+func (s *NATSKVStore) SaveCheckpoint(ctx context.Context, checkpoint *domain.Checkpoint) error {
+	if checkpoint == nil {
+		return fmt.Errorf("storage: checkpoint is nil")
+	}
+	if checkpoint.FlowID == "" {
+		return fmt.Errorf("storage: checkpoint flow_id is required")
+	}
+	if checkpoint.UpdatedAt.IsZero() {
+		checkpoint.UpdatedAt = time.Now().UTC()
+	}
+	data, err := sonic.Marshal(checkpoint)
+	if err != nil {
+		return fmt.Errorf("storage: marshal checkpoint for flow %q: %w", checkpoint.FlowID, err)
+	}
+	key := "checkpoint." + checkpoint.FlowID
+	if _, err := s.bucket.Put(ctx, key, data); err != nil {
+		return fmt.Errorf("storage: save checkpoint for flow %q: %w", checkpoint.FlowID, err)
+	}
+	return nil
+}
+
+func (s *NATSKVStore) GetCheckpoint(ctx context.Context, flowID string) (*domain.Checkpoint, error) {
+	key := "checkpoint." + flowID
+	entry, err := s.bucket.Get(ctx, key)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("storage: get checkpoint for flow %q: %w", flowID, err)
+	}
+	var checkpoint domain.Checkpoint
+	if err := sonic.Unmarshal(entry.Value(), &checkpoint); err != nil {
+		return nil, fmt.Errorf("storage: unmarshal checkpoint for flow %q: %w", flowID, err)
+	}
+	return &checkpoint, nil
 }
 
 func (s *NATSKVStore) SaveSourceOffset(ctx context.Context, sourceID string, offset string) error {

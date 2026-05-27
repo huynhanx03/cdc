@@ -43,6 +43,7 @@ func TestBuildDLQEnvelopePreservesOriginalMessage(t *testing.T) {
 			"cdc-instance-id": []string{"src"},
 			"cdc-schema":      []string{"public"},
 			"cdc-table":       []string{"users"},
+			"cdc-op":          []string{"c"},
 			"Nats-Msg-Id":     []string{"src-123"},
 		},
 		meta: &jetstream.MsgMetadata{NumDelivered: 7},
@@ -50,9 +51,16 @@ func TestBuildDLQEnvelopePreservesOriginalMessage(t *testing.T) {
 
 	env, err := buildDLQEnvelope(msg, ports.DLQMoveOptions{
 		FlowID:     "flow-1",
+		SourceID:   "source-override",
 		SinkID:     "sink-1",
+		Schema:     "warehouse",
+		Table:      "users_archive",
+		Op:         "u",
+		MsgID:      "event-1",
 		Reason:     "sink_error: duplicate key",
 		ErrorClass: cdcerrors.DLQErrorSink,
+		RetryCount: 3,
+		Timestamp:  123456,
 	})
 	if err != nil {
 		t.Fatalf("buildDLQEnvelope failed: %v", err)
@@ -67,11 +75,11 @@ func TestBuildDLQEnvelopePreservesOriginalMessage(t *testing.T) {
 	if env.OriginalHeaders["Nats-Msg-Id"] != "src-123" {
 		t.Fatalf("Nats-Msg-Id header was not preserved: %+v", env.OriginalHeaders)
 	}
-	if env.SourceID != "src" || env.Schema != "public" || env.Table != "users" {
+	if env.SourceID != "source-override" || env.Schema != "warehouse" || env.Table != "users_archive" || env.Op != "u" || env.MsgID != "event-1" {
 		t.Fatalf("source routing metadata not preserved: %+v", env)
 	}
-	if env.DeliveryCount != 7 {
-		t.Fatalf("DeliveryCount = %d, want 7", env.DeliveryCount)
+	if env.DeliveryCount != 7 || env.RetryCount != 3 || env.FailedAt != 123456 {
+		t.Fatalf("retry metadata not preserved: %+v", env)
 	}
 	if env.Reason != "sink_error: duplicate key" || env.ErrorClass != cdcerrors.DLQErrorSink {
 		t.Fatalf("failure metadata not preserved: %+v", env)

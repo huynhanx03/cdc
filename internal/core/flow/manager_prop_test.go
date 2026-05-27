@@ -23,6 +23,7 @@ type mockStore struct {
 	sinks         map[string]*ports.SinkConfig
 	flows         map[string]*ports.FlowConfig
 	offsets       map[string]string
+	checkpoints   map[string]*domain.Checkpoint
 	sourceOffsets map[string]string
 }
 
@@ -32,6 +33,7 @@ func newMockStore() *mockStore {
 		sinks:         make(map[string]*ports.SinkConfig),
 		flows:         make(map[string]*ports.FlowConfig),
 		offsets:       make(map[string]string),
+		checkpoints:   make(map[string]*domain.Checkpoint),
 		sourceOffsets: make(map[string]string),
 	}
 }
@@ -97,6 +99,13 @@ func (s *mockStore) SaveOffset(_ context.Context, flowID string, offset string) 
 func (s *mockStore) GetOffset(_ context.Context, flowID string) (string, error) {
 	return s.offsets[flowID], nil
 }
+func (s *mockStore) SaveCheckpoint(_ context.Context, checkpoint *domain.Checkpoint) error {
+	s.checkpoints[checkpoint.FlowID] = checkpoint
+	return nil
+}
+func (s *mockStore) GetCheckpoint(_ context.Context, flowID string) (*domain.Checkpoint, error) {
+	return s.checkpoints[flowID], nil
+}
 func (s *mockStore) SaveSourceOffset(_ context.Context, sourceID string, offset string) error {
 	s.sourceOffsets[sourceID] = offset
 	return nil
@@ -127,10 +136,10 @@ func (r *mockRegistry) SinkNames() []string   { return nil }
 // mockSink implements ports.Sink for testing.
 type mockSink struct{}
 
-func (s *mockSink) WriteBatch(_ []*domain.Event) error { return nil }
-func (s *mockSink) Close() error                       { return nil }
-func (s *mockSink) InstanceID() string                 { return "mock-sink" }
-func (s *mockSink) Type() string                       { return "mock" }
+func (s *mockSink) WriteBatch(_ context.Context, _ []*domain.Event) error { return nil }
+func (s *mockSink) Close() error                                          { return nil }
+func (s *mockSink) InstanceID() string                                    { return "mock-sink" }
+func (s *mockSink) Type() string                                          { return "mock" }
 
 // mockNATSClient implements ports.NATSClient for testing.
 type mockNATSClient struct {
@@ -155,6 +164,7 @@ func (n *mockNATSClient) PublishBatch(_ context.Context, _ func(*domain.Event) s
 func (n *mockNATSClient) CreateOrUpdateConsumer(_ context.Context, _ string, _ []string) (jetstream.Consumer, error) {
 	return &mockConsumer{}, nil
 }
+func (n *mockNATSClient) DeleteConsumer(_ context.Context, _ string) error { return nil }
 func (n *mockNATSClient) MoveToDLQ(_ context.Context, _ jetstream.Msg, _ ports.DLQMoveOptions) error {
 	return nil
 }
@@ -535,6 +545,31 @@ func TestUpdateFlowAllowsSameTableMappingForSameFlow(t *testing.T) {
 
 	if err != nil {
 		t.Fatalf("UpdateFlow failed: %v", err)
+	}
+}
+
+func TestCreateFlowRejectsInvalidFilterExpression(t *testing.T) {
+	store := newMockStore()
+	if err := store.PutSource(context.Background(), &ports.SourceConfig{InstanceID: "src-1", Type: "postgres"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutSink(context.Background(), &ports.SinkConfig{InstanceID: "sink-1", Type: "postgres"}); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(store, NewPoolManager(), &mockRegistry{}, &mockNATSClient{}, nil)
+
+	_, err := manager.CreateFlow(context.Background(), &ports.FlowConfig{
+		SourceID:    "src-1",
+		SinkID:      "sink-1",
+		SourceTable: "public.users",
+		SinkTable:   "public.users",
+		Options:     &ports.FlowOptions{FilterExpression: `data.status ++ "active"`},
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid filter expression") {
+		t.Fatalf("err = %v, want invalid filter expression", err)
+	}
+	if flows, _ := store.ListFlows(context.Background()); len(flows) != 0 {
+		t.Fatalf("flow persisted despite invalid filter: %+v", flows)
 	}
 }
 

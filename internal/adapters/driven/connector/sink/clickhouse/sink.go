@@ -79,14 +79,13 @@ func New(cfg *ports.SinkConfig) (*ClickhouseSink, error) {
 }
 
 // WriteBatch writes events to ClickHouse grouped by table.
-func (s *ClickhouseSink) WriteBatch(events []*domain.Event) error {
+func (s *ClickhouseSink) WriteBatch(ctx context.Context, events []*domain.Event) error {
 	// Group events by table as ClickHouse Bulk Insert is per table
 	tableEvents := make(map[string][]*domain.Event)
 	for _, event := range events {
 		tableEvents[event.Table] = append(tableEvents[event.Table], event)
 	}
 
-	ctx := context.Background()
 	for tableName, evts := range tableEvents {
 		if err := s.writeTable(ctx, tableName, evts); err != nil {
 			slog.Error("Clickhouse write table failed", "table", tableName, "error", err)

@@ -30,12 +30,15 @@ type DLQEnvelope struct {
 	SourceID        string            `json:"source_id,omitempty"`
 	Schema          string            `json:"schema,omitempty"`
 	Table           string            `json:"table,omitempty"`
+	Op              string            `json:"op,omitempty"`
+	MsgID           string            `json:"msg_id,omitempty"`
 	OriginalSubject string            `json:"original_subject"`
 	OriginalHeaders map[string]string `json:"original_headers,omitempty"`
 	Payload         json.RawMessage   `json:"payload"`
 	Reason          string            `json:"reason"`
 	ErrorClass      string            `json:"error_class"`
 	DeliveryCount   uint64            `json:"delivery_count"`
+	RetryCount      uint64            `json:"retry_count"`
 	FailedAt        int64             `json:"failed_at"`
 }
 
@@ -169,22 +172,47 @@ func buildDLQEnvelope(msg jetstream.Msg, opts ports.DLQMoveOptions) (DLQEnvelope
 	if errorClass == "" {
 		errorClass = cdcerrors.DLQErrorSink
 	}
+	failedAt := opts.Timestamp
+	if failedAt <= 0 {
+		failedAt = time.Now().UnixMilli()
+	}
+	sourceID := firstNonEmpty(opts.SourceID, headers[constant.HeaderInstanceID])
+	schema := firstNonEmpty(opts.Schema, headers[constant.HeaderSchema])
+	table := firstNonEmpty(opts.Table, headers[constant.HeaderTable])
+	op := firstNonEmpty(opts.Op, headers[constant.HeaderOp])
+	optionMsgID := firstNonEmpty(opts.MsgID, msgID)
+	retryCount := opts.RetryCount
+	if retryCount == 0 {
+		retryCount = deliveryCount
+	}
 
 	return DLQEnvelope{
 		ID:              "dlq-" + msgID,
 		FlowID:          opts.FlowID,
 		SinkID:          opts.SinkID,
-		SourceID:        headers[constant.HeaderInstanceID],
-		Schema:          headers[constant.HeaderSchema],
-		Table:           headers[constant.HeaderTable],
+		SourceID:        sourceID,
+		Schema:          schema,
+		Table:           table,
+		Op:              op,
+		MsgID:           optionMsgID,
 		OriginalSubject: originalSubject,
 		OriginalHeaders: headers,
 		Payload:         payload,
 		Reason:          strings.TrimSpace(opts.Reason),
 		ErrorClass:      errorClass,
 		DeliveryCount:   deliveryCount,
-		FailedAt:        time.Now().UnixMilli(),
+		RetryCount:      retryCount,
+		FailedAt:        failedAt,
 	}, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func buildReprocessMsg(env DLQEnvelope) (*nats.Msg, error) {

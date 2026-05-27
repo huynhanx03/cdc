@@ -14,10 +14,13 @@ type Metrics struct {
 }
 
 type flowStats struct {
-	written  atomic.Uint64
-	filtered atomic.Uint64
-	failed   atomic.Uint64
-	dlq      atomic.Uint64
+	written      atomic.Uint64
+	filtered     atomic.Uint64
+	failed       atomic.Uint64
+	dlq          atomic.Uint64
+	checkpoint   atomic.Uint64
+	retry        atomic.Uint64
+	backpressure atomic.Uint64
 
 	throughputBits   atomic.Uint64
 	lastThroughputAt atomic.Int64
@@ -43,6 +46,9 @@ type FlowStatsSnapshot struct {
 	FailureCount         uint64
 	DLQCount             uint64
 	FilteredCount        uint64
+	CheckpointSaveCount  uint64
+	RetryCount           uint64
+	BackpressureCount    uint64
 	LastError            string
 }
 
@@ -59,6 +65,18 @@ type ComponentStatsSnapshot struct {
 
 var defaultMetrics = NewMetrics()
 
+var runtimeMetricNames = []string{
+	"events_in_total",
+	"events_out_total",
+	"sink_write_duration_ms",
+	"checkpoint_save_total",
+	"retry_total",
+	"dlq_total",
+	"nats_pending",
+	"worker_backpressure_total",
+	"source_lag_ms",
+}
+
 func NewMetrics() *Metrics {
 	return &Metrics{}
 }
@@ -71,6 +89,10 @@ func SetDefaultMetrics(metrics *Metrics) {
 	if metrics != nil {
 		defaultMetrics = metrics
 	}
+}
+
+func RuntimeMetricNames() []string {
+	return append([]string(nil), runtimeMetricNames...)
 }
 
 func (m *Metrics) RecordSourceProduced(sourceID, schema, table string, count uint64, eventTimeMs int64) {
@@ -138,6 +160,29 @@ func (m *Metrics) RecordDLQ(flowID, sinkID, reason string, count uint64) {
 	}
 }
 
+func (m *Metrics) RecordCheckpointSave(flowID string, count uint64) {
+	m.flowStats(flowID).checkpoint.Add(count)
+}
+
+func (m *Metrics) RecordRetry(flowID, sinkID, reason string, count uint64) {
+	flow := m.flowStats(flowID)
+	flow.retry.Add(count)
+	if reason != "" {
+		flow.lastErr.Store(reason)
+	}
+	if sinkID != "" {
+		sink := m.sinkStats(sinkID)
+		sink.failed.Add(count)
+		if reason != "" {
+			sink.lastErr.Store(reason)
+		}
+	}
+}
+
+func (m *Metrics) RecordBackpressure(flowID string, count uint64) {
+	m.flowStats(flowID).backpressure.Add(count)
+}
+
 func (m *Metrics) RecordFlowStopped(flowID string) {}
 
 func (m *Metrics) FlowSnapshot(flowID string) (FlowStatsSnapshot, bool) {
@@ -153,6 +198,9 @@ func (m *Metrics) FlowSnapshot(flowID string) (FlowStatsSnapshot, bool) {
 		FailureCount:         stats.failed.Load(),
 		DLQCount:             stats.dlq.Load(),
 		FilteredCount:        stats.filtered.Load(),
+		CheckpointSaveCount:  stats.checkpoint.Load(),
+		RetryCount:           stats.retry.Load(),
+		BackpressureCount:    stats.backpressure.Load(),
 		LastError:            loadString(stats.lastErr),
 	}, true
 }
@@ -183,6 +231,9 @@ func (m *Metrics) RangeFlows(fn func(flowID string, stats FlowStatsSnapshot) boo
 			FailureCount:         s.failed.Load(),
 			DLQCount:             s.dlq.Load(),
 			FilteredCount:        s.filtered.Load(),
+			CheckpointSaveCount:  s.checkpoint.Load(),
+			RetryCount:           s.retry.Load(),
+			BackpressureCount:    s.backpressure.Load(),
 			LastError:            loadString(s.lastErr),
 		}
 		return fn(key.(string), snapshot)

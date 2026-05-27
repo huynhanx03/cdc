@@ -107,6 +107,9 @@ func invalidArgumentIfRequired(err error) error {
 	if errors.Is(err, cdcerrors.ErrDuplicateConfig) {
 		return status.Error(codes.AlreadyExists, err.Error())
 	}
+	if errors.Is(err, cdcerrors.ErrValidation) {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
 	return nil
 }
 

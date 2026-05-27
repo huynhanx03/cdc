@@ -71,7 +71,7 @@ func New(cfg *ports.SinkConfig) (*ElasticSink, error) {
 }
 
 // WriteBatch writes events to Elasticsearch using the Bulk API.
-func (s *ElasticSink) WriteBatch(events []*domain.Event) error {
+func (s *ElasticSink) WriteBatch(ctx context.Context, events []*domain.Event) error {
 	buf := s.bufPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	defer s.bufPool.Put(buf)
