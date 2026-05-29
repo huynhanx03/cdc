@@ -51,6 +51,9 @@ func (s *CDCService) ListSinks(ctx context.Context, req *cdcpb.ListSinksRequest)
 
 func (s *CDCService) DeleteSink(ctx context.Context, req *cdcpb.DeleteSinkRequest) (*cdcpb.DeleteSinkResponse, error) {
 	result, err := s.sinkService.Delete(ctx, request.DeleteSinkRequest{InstanceID: req.InstanceId})
+	if grpcErr := invalidArgumentIfRequired(err); grpcErr != nil {
+		return nil, grpcErr
+	}
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to delete sink: %v", err)
 	}

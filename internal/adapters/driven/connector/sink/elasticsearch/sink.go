@@ -54,6 +54,8 @@ type bulkItemError struct {
 	Reason string `json:"reason"`
 }
 
+const bulkBufferInitialSize = 64 * 1024
+
 // New creates an ElasticSink and verifies connection.
 func New(cfg *ports.SinkConfig) (*ElasticSink, error) {
 	client, err := newClient(cfg)
@@ -65,7 +67,7 @@ func New(cfg *ports.SinkConfig) (*ElasticSink, error) {
 		client: client,
 		cfg:    cfg,
 		bufPool: sync.Pool{New: func() interface{} {
-			return bytes.NewBuffer(make([]byte, 0, 64*1024))
+			return bytes.NewBuffer(make([]byte, 0, bulkBufferInitialSize))
 		}},
 	}, nil
 }

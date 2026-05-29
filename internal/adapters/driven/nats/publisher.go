@@ -86,6 +86,7 @@ func (c *Client) toNatsMsg(subject string, event *domain.Event) (*nats.Msg, erro
 	headers.Set(constant.HeaderSchema, event.Schema)
 	headers.Set(constant.HeaderTable, event.Table)
 	headers.Set(constant.HeaderOp, string(event.Op))
+	headers.Set(constant.HeaderPartition, strconv.Itoa(event.Partition))
 
 	if event.LSN > 0 {
 		headers.Set(constant.HeaderLSN, strconv.FormatUint(event.LSN, 10))

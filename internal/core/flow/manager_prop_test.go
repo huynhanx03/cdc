@@ -22,7 +22,6 @@ type mockStore struct {
 	sources       map[string]*ports.SourceConfig
 	sinks         map[string]*ports.SinkConfig
 	flows         map[string]*ports.FlowConfig
-	offsets       map[string]string
 	checkpoints   map[string]*domain.Checkpoint
 	sourceOffsets map[string]string
 }
@@ -32,7 +31,6 @@ func newMockStore() *mockStore {
 		sources:       make(map[string]*ports.SourceConfig),
 		sinks:         make(map[string]*ports.SinkConfig),
 		flows:         make(map[string]*ports.FlowConfig),
-		offsets:       make(map[string]string),
 		checkpoints:   make(map[string]*domain.Checkpoint),
 		sourceOffsets: make(map[string]string),
 	}
@@ -91,13 +89,6 @@ func (s *mockStore) ListFlows(_ context.Context) ([]*ports.FlowConfig, error) {
 		result = append(result, v)
 	}
 	return result, nil
-}
-func (s *mockStore) SaveOffset(_ context.Context, flowID string, offset string) error {
-	s.offsets[flowID] = offset
-	return nil
-}
-func (s *mockStore) GetOffset(_ context.Context, flowID string) (string, error) {
-	return s.offsets[flowID], nil
 }
 func (s *mockStore) SaveCheckpoint(_ context.Context, checkpoint *domain.Checkpoint) error {
 	s.checkpoints[checkpoint.FlowID] = checkpoint
@@ -171,7 +162,16 @@ func (n *mockNATSClient) MoveToDLQ(_ context.Context, _ jetstream.Msg, _ ports.D
 func (n *mockNATSClient) ReprocessDLQ(_ context.Context) (int, error) {
 	return 0, nil
 }
+func (n *mockNATSClient) PreviewDLQ(_ context.Context, _ []string, _ ports.DLQFilter, _ uint32) ([]ports.DLQPreviewItem, error) {
+	return nil, nil
+}
+func (n *mockNATSClient) ReprocessDLQSelected(_ context.Context, _ []string, _ ports.DLQFilter, _ uint32) (ports.DLQReprocessResult, error) {
+	return ports.DLQReprocessResult{}, nil
+}
 func (n *mockNATSClient) ListMessages(_ context.Context, _ domain.MessageStatus, _ int, _ int, _ string, _ string) ([]*ports.NATSMessageItem, uint64, error) {
+	return nil, 0, nil
+}
+func (n *mockNATSClient) ListMessagesWithFilter(_ context.Context, _ domain.MessageStatus, _ int, _ int, _ ports.NATSMessageFilter) ([]*ports.NATSMessageItem, uint64, error) {
 	return nil, 0, nil
 }
 func (n *mockNATSClient) ListDLQMessages(_ context.Context, _ int, _ int) ([]*ports.NATSMessageItem, uint64, error) {

@@ -1,6 +1,5 @@
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Activity,
   Timer,
@@ -18,14 +17,10 @@ import { StatusBadge } from '@/components/shared/StatusBadge';
 import { SystemHealthBar } from './components/SystemHealthBar';
 import { ROUTES } from '@/config/routes';
 import {
-  dashboardKeys,
   useHealth,
   useDashboardSummary,
 } from '@/lib/query/dashboard';
-import { api } from '@/lib/api/client';
-import { ENDPOINTS } from '@/lib/api/endpoints';
 import { formatNumber, formatDuration, formatPercent } from '@/lib/format';
-import type { ReprocessDLQResponse } from '@/types/api';
 
 function isHealthyStatus(status?: string) {
   return status === 'healthy' || status === 'ok' || status === 'up';
@@ -35,7 +30,6 @@ function isHealthyStatus(status?: string) {
 export default function DashboardPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
 
   const {
     data: health,
@@ -52,12 +46,6 @@ export default function DashboardPage() {
   const inventory = summary?.inventory;
   const telemetry = summary?.telemetry;
   const dlqCount = telemetry?.failure_count ?? 0;
-  const dlqMutation = useMutation({
-    mutationFn: () => api.post<ReprocessDLQResponse>(ENDPOINTS.dlqReprocess),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: dashboardKeys.summary });
-    },
-  });
 
   return (
     <div className="space-y-6">
@@ -184,8 +172,7 @@ export default function DashboardPage() {
         channelUtilPercent={telemetry?.channel_utilization ?? 0}
         activeWorkers={telemetry?.active_workers ?? 0}
         dlqCount={dlqCount}
-        onReprocessDlq={() => dlqMutation.mutate()}
-        isReprocessing={dlqMutation.isPending}
+        onReprocessDlq={() => navigate(ROUTES.EXPLORER_DLQ)}
       />
     </div>
   );

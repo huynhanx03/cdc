@@ -39,23 +39,13 @@ import {
 } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
 import { StatusBadge, type Status } from '@/components/shared/StatusBadge';
+import { labelKeyForFlowStatus, statusForFlow } from '@/config/status';
 import { ROUTES } from '@/config/routes';
 import { formatNumber, formatDuration } from '@/lib/format';
-import type { FlowStatus } from '@/types/api';
 import { DeleteConfirmDialog } from '../components/DeleteConfirmDialog';
 
-function statusToBadge(status: FlowStatus | string): Status {
-  if (status === 'FLOW_STATUS_RUNNING') return 'healthy';
-  if (status === 'FLOW_STATUS_PAUSED') return 'paused';
-  if (status === 'FLOW_STATUS_ERROR') return 'unhealthy';
-  return 'idle';
-}
-
-function statusLabel(status: FlowStatus | string) {
-  if (status === 'FLOW_STATUS_RUNNING') return 'Running';
-  if (status === 'FLOW_STATUS_PAUSED') return 'Paused';
-  if (status === 'FLOW_STATUS_ERROR') return 'Error';
-  return 'Idle';
+function statusToBadge(status: string): Status {
+  return statusForFlow(status);
 }
 
 function RuntimeStatCard({
@@ -207,9 +197,7 @@ export default function FlowDetailPage() {
               </h1>
               <StatusBadge
                 status={statusToBadge(flow.status)}
-                label={t(`common.status.${statusToBadge(flow.status)}`, {
-                  defaultValue: statusLabel(flow.status),
-                })}
+                label={t(labelKeyForFlowStatus(flow.status))}
               />
             </div>
           </div>
@@ -281,20 +269,17 @@ export default function FlowDetailPage() {
           loading={statsLoading}
         />
         <RuntimeStatCard
-          title={t('manager.flows.metrics.failures', { defaultValue: 'Failures' })}
+          title={t('manager.flows.metrics.failures')}
           value={formatNumber(statsData?.failure_count || 0)}
-          description={t('manager.flows.metrics.failuresDesc', {
-            defaultValue: 'Failed sink writes or mapping errors',
-          })}
+          description={t('manager.flows.metrics.failuresDesc')}
           icon={AlertTriangle}
           tone={(statsData?.failure_count || 0) > 0 ? 'red' : 'emerald'}
           loading={statsLoading}
         />
         <RuntimeStatCard
-          title={t('manager.flows.metrics.workers', { defaultValue: 'Workers' })}
+          title={t('manager.flows.metrics.workers')}
           value={`${statsData?.running_workers ?? 0}/${statsData?.pool_capacity ?? flow.options?.partition_count ?? 4}`}
           description={t('manager.flows.metrics.workersDesc', {
-            defaultValue: '{{value}} pool utilization',
             value: `${(statsData?.worker_utilization ?? 0).toFixed(0)}%`,
           })}
           icon={Gauge}
@@ -364,7 +349,7 @@ export default function FlowDetailPage() {
 
             {!flow.column_mappings?.length ? (
               <div className="rounded-lg border border-dashed border-border py-8 text-center text-xs text-muted-foreground">
-                {t('manager.flows.detail.noMappings', { defaultValue: 'No column mappings configured.' })}
+                {t('manager.flows.detail.noMappings')}
               </div>
             ) : (
               <div className="overflow-hidden rounded-lg border border-border">
@@ -471,7 +456,7 @@ export default function FlowDetailPage() {
               </div>
               <div className="rounded-md border border-border bg-muted/20 px-3 py-2">
                 <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                  {t('manager.flows.metrics.filtered', { defaultValue: 'Filtered' })}
+                  {t('manager.flows.metrics.filtered')}
                 </p>
                 <p className="mt-1 font-mono text-sm font-semibold text-foreground">
                   {formatNumber(statsData?.filtered_count || 0)}
@@ -479,7 +464,7 @@ export default function FlowDetailPage() {
               </div>
               <div className="rounded-md border border-border bg-muted/20 px-3 py-2">
                 <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                  {t('manager.flows.metrics.dlq', { defaultValue: 'DLQ' })}
+                  {t('manager.flows.metrics.dlq')}
                 </p>
                 <p className="mt-1 font-mono text-sm font-semibold text-foreground">
                   {formatNumber(statsData?.dlq_count || 0)}
@@ -488,7 +473,7 @@ export default function FlowDetailPage() {
               {statsData?.last_error && (
                 <div className="rounded-md border border-red-500/20 bg-red-500/5 px-3 py-2">
                   <p className="text-[10px] uppercase tracking-wide text-red-500">
-                    {t('manager.flows.metrics.lastError', { defaultValue: 'Last error' })}
+                    {t('manager.flows.metrics.lastError')}
                   </p>
                   <p className="mt-1 truncate font-mono text-xs text-red-500">
                     {statsData.last_error}
@@ -512,7 +497,7 @@ export default function FlowDetailPage() {
               </pre>
             ) : (
               <div className="rounded-md border border-dashed border-border py-6 text-center text-xs text-muted-foreground">
-                {t('manager.cards.filterOff', { defaultValue: 'No filter' })}
+                {t('manager.cards.filterOff')}
               </div>
             )}
           </div>

@@ -126,6 +126,9 @@ func (s *CDCService) UpdateFlow(ctx context.Context, req *cdcpb.UpdateFlowReques
 
 func (s *CDCService) DeleteFlow(ctx context.Context, req *cdcpb.DeleteFlowRequest) (*cdcpb.DeleteFlowResponse, error) {
 	result, err := s.flowService.Delete(ctx, request.DeleteFlowRequest{FlowID: req.FlowId})
+	if grpcErr := invalidArgumentIfRequired(err); grpcErr != nil {
+		return nil, grpcErr
+	}
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to delete flow: %v", err)
 	}

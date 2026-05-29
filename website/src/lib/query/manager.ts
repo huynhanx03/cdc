@@ -2,6 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api/client';
 import { ENDPOINTS } from '@/lib/api/endpoints';
 import { POLLING } from '@/config/constants';
+import { SINK_CONNECTOR_TYPES, SOURCE_CONNECTOR_TYPES } from '@/config/connectors';
 import type {
   SourceConfig,
   SinkConfig,
@@ -41,8 +42,8 @@ export function useConfig() {
         sinks: sinksQuery.data?.sinks ?? [],
         flows: flowsQuery.data?.flows ?? [],
       },
-      available_sources: ['postgres', 'mysql'],
-      available_sinks: ['postgres', 'mysql', 'elasticsearch', 'clickhouse'],
+      available_sources: [...SOURCE_CONNECTOR_TYPES],
+      available_sinks: [...SINK_CONNECTOR_TYPES],
     },
     isLoading:
       sourcesQuery.isLoading || sinksQuery.isLoading || flowsQuery.isLoading,

@@ -8,4 +8,5 @@ const (
 	HeaderSchema     = "cdc-schema"
 	HeaderTable      = "cdc-table"
 	HeaderOp         = "cdc-op"
+	HeaderPartition  = "cdc-partition"
 )

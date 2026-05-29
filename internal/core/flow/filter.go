@@ -9,9 +9,10 @@ import (
 	"github.com/google/cel-go/cel"
 )
 
-// Filter evaluates a filter expression against event data.
-// CEL expressions receive a "data" variable which is the event's after/before payload as a map.
-// Example expressions: `data.status == "active"`, `data.amount > 100`
+// Filter evaluates a CEL expression against event data.
+// Debezium-style payloads should use explicit envelope variables such as
+// `after.status == "active"` or `before.id == 1`; `data` remains available
+// as the full decoded payload for backward compatibility.
 // Empty expression always returns true (pass all).
 type Filter struct {
 	expression string
@@ -39,7 +40,7 @@ func NewFilter(expression string) (*Filter, error) {
 	}, nil
 }
 
-// compileCEL compiles a CEL expression with a "data" variable of type map[string]dyn.
+// compileCEL compiles a CEL expression with envelope variables and a backward-compatible data map.
 func compileCEL(expr string) (cel.Program, error) {
 	env, err := cel.NewEnv(
 		cel.Variable("data", cel.MapType(cel.StringType, cel.DynType)),

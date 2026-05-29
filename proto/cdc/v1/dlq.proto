@@ -5,6 +5,31 @@ package cdc.v1;
 option go_package = "github.com/foden/cdc/api/proto/v1;cdcpb";
 
 import "common.proto";
+import "explorer.proto";
+
+enum DLQDuplicateRisk {
+  DLQ_DUPLICATE_RISK_UNSPECIFIED = 0;
+  DLQ_DUPLICATE_RISK_NONE = 1;
+  DLQ_DUPLICATE_RISK_POSSIBLE = 2;
+  DLQ_DUPLICATE_RISK_HIGH = 3;
+  DLQ_DUPLICATE_RISK_BLOCKED = 4;
+}
+
+message DLQFilter {
+  optional string original_topic = 1;
+  optional string original_partition = 2;
+  optional string source_id = 3;
+  optional string schema = 4;
+  optional string table = 5;
+  optional string op = 6;
+  optional string reason_contains = 7;
+  optional string error_class = 8;
+  optional string header_key = 9;
+  optional string header_value = 10;
+  optional string json_path = 11;
+  optional string json_equals = 12;
+  optional string text_contains = 13;
+}
 
 message DLQMessage {
   uint64 sequence = 1;
@@ -14,19 +39,71 @@ message DLQMessage {
   map<string, string> headers = 5;
   string reason = 6;
   string original_subject = 7;
+  string dlq_id = 8;
+  string flow_id = 9;
+  string source_id = 10;
+  string sink_id = 11;
+  string schema = 12;
+  string table = 13;
+  string op = 14;
+  string msg_id = 15;
+  string error_class = 16;
+  uint64 delivery_count = 17;
+  uint64 retry_count = 18;
+  int64 failed_at = 19;
+  DLQDuplicateRisk duplicate_risk = 20;
+  string blocked_reason = 21;
 }
 
 message ListDLQMessagesRequest {
   OffsetPaginationRequest pagination = 1;
+  DLQFilter filter = 2;
 }
 
 message ListDLQMessagesResponse {
   repeated DLQMessage data = 1;
   OffsetPaginationResponse pagination = 2;
+  cdc.v1.ExplorerScanMetadata scan = 3;
 }
 
-message ReprocessDLQRequest {}
+message PreviewDLQReprocessRequest {
+  repeated string selected_dlq_ids = 1;
+  DLQFilter filter = 2;
+  uint32 max_count = 3;
+}
+
+message DLQDryRunPreviewItem {
+  string dlq_id = 1;
+  string original_subject = 2;
+  string reason = 3;
+  DLQDuplicateRisk duplicate_risk = 4;
+  string blocked_reason = 5;
+  string replay_target = 6;
+  uint64 message_sequence = 7;
+  string message_timestamp = 8;
+}
+
+message PreviewDLQReprocessResponse {
+  uint32 selected_count = 1;
+  uint32 preview_count = 2;
+  uint32 blocked_count = 3;
+  repeated DLQDryRunPreviewItem preview_items = 4;
+  string confirm_token = 5;
+  repeated string warnings = 6;
+}
+
+message ReprocessDLQRequest {
+  repeated string selected_dlq_ids = 1;
+  DLQFilter filter = 2;
+  string confirm_token = 3;
+  bool dry_run = 4;
+  uint32 max_count = 5;
+}
 
 message ReprocessDLQResponse {
   int32 count = 1;
+  repeated string reprocessed_dlq_ids = 2;
+  repeated string skipped_dlq_ids = 3;
+  repeated string failed_dlq_ids = 4;
+  bool dry_run = 5;
 }

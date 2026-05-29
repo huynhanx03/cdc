@@ -24,7 +24,8 @@ import {
 import { useMessages, usePartitions, useTopics } from '@/lib/query/explorer';
 import type { MessageItem } from '@/types/api';
 import { MessageDetailSheet } from '../components/MessageDetailSheet';
-import { formatBytes, formatTime, messageSize, parseSubject, StatusBadge } from '../shared';
+import { StatusBadge } from '../components/StatusBadge';
+import { formatBytes, formatTime, messageSize, parseSubject } from '../shared';
 
 export default function ExplorerMessagesPage() {
   const { t } = useTranslation();

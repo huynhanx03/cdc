@@ -52,11 +52,20 @@ graph LR
 - **Sources**: PostgreSQL (WAL logical replication), MySQL/MariaDB (Binlog)
 - **Sinks**: ClickHouse, PostgreSQL, Elasticsearch
 - **Pipeline**: CEL-based filtering & transformation, N-to-N routing, partition-aware consumers
-- **Delivery**: Exactly-once semantics, Dead Letter Queue, configurable batching & retries
+- **Delivery**: At-least-once delivery, idempotent writes where sink keys support it, Dead Letter Queue, configurable batching & retries
 - **Management**: gRPC + REST API, Web UI dashboard, schema discovery, message explorer
 - **Observability**: Prometheus metrics, structured logging, health checks
 
 ## Quick Start
+
+## Delivery Guarantees
+
+| Area | Current guarantee |
+|------|-------------------|
+| Source to NATS | Events are retried until published to JetStream. Source WAL/binlog resume is tracked separately from flow checkpoints. |
+| NATS to sink | At-least-once. A sink write may be retried, so sinks should use primary keys/upserts or another idempotency strategy. |
+| Checkpointing | Flow checkpoints are saved per flow/source/table/partition after sink write and NATS ACK succeed. |
+| Exactly-once | Not claimed end-to-end. Duplicate delivery is possible during retries, reconnects, and recovery. |
 
 ### Run
 

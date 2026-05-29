@@ -18,6 +18,13 @@ import (
 // Compile-time assertion that Client implements ports.NATSClient.
 var _ ports.NATSClient = (*Client)(nil)
 
+const (
+	bytesPerMiB                = 1024 * 1024
+	defaultPingInterval        = 20 * time.Second
+	defaultMaxPingsOutstanding = 5
+	healthFlushTimeout         = 500 * time.Millisecond
+)
+
 // Client handles storage and retrieval of events using NATS JetStream
 type Client struct {
 	nc         *nats.Conn
@@ -35,9 +42,9 @@ func NewClient(cfg *config.NATSConfig) (*Client, error) {
 	opts := []nats.Option{
 		nats.MaxReconnects(cfg.MaxReconnects),
 		nats.ReconnectWait(time.Duration(cfg.ReconnectWaitMs) * time.Millisecond),
-		nats.ReconnectBufSize(cfg.ReconnectBufferSizeMb * 1024 * 1024),
-		nats.PingInterval(20 * time.Second),
-		nats.MaxPingsOutstanding(5),
+		nats.ReconnectBufSize(cfg.ReconnectBufferSizeMb * bytesPerMiB),
+		nats.PingInterval(defaultPingInterval),
+		nats.MaxPingsOutstanding(defaultMaxPingsOutstanding),
 		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
 			if err != nil {
 				slog.Error("NATS disconnected", "err", err)
@@ -89,7 +96,7 @@ func (c *Client) Health(ctx context.Context) error {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- c.nc.FlushTimeout(500 * time.Millisecond)
+		done <- c.nc.FlushTimeout(healthFlushTimeout)
 	}()
 
 	select {

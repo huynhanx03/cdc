@@ -23,6 +23,7 @@ type workerTestMsg struct {
 	data  []byte
 	acked bool
 	naked bool
+	calls *[]string
 }
 
 func (m *workerTestMsg) Metadata() (*jetstream.MsgMetadata, error) { return m.meta, nil }
@@ -40,9 +41,15 @@ func (m *workerTestMsg) Headers() nats.Header {
 		constant.HeaderOp:     []string{"c"},
 	}
 }
-func (m *workerTestMsg) Subject() string                  { return "cdc.src.public.users.0" }
-func (m *workerTestMsg) Reply() string                    { return "" }
-func (m *workerTestMsg) Ack() error                       { m.acked = true; return nil }
+func (m *workerTestMsg) Subject() string { return "cdc.src.public.users.0" }
+func (m *workerTestMsg) Reply() string   { return "" }
+func (m *workerTestMsg) Ack() error {
+	m.acked = true
+	if m.calls != nil {
+		*m.calls = append(*m.calls, "ack")
+	}
+	return nil
+}
 func (m *workerTestMsg) DoubleAck(context.Context) error  { return nil }
 func (m *workerTestMsg) Nak() error                       { m.naked = true; return nil }
 func (m *workerTestMsg) NakWithDelay(time.Duration) error { m.naked = true; return nil }
@@ -80,7 +87,16 @@ func (n *workerTestNATS) MoveToDLQ(_ context.Context, msg jetstream.Msg, opts po
 	return msg.Ack()
 }
 func (n *workerTestNATS) ReprocessDLQ(context.Context) (int, error) { return 0, nil }
+func (n *workerTestNATS) PreviewDLQ(context.Context, []string, ports.DLQFilter, uint32) ([]ports.DLQPreviewItem, error) {
+	return nil, nil
+}
+func (n *workerTestNATS) ReprocessDLQSelected(context.Context, []string, ports.DLQFilter, uint32) (ports.DLQReprocessResult, error) {
+	return ports.DLQReprocessResult{}, nil
+}
 func (n *workerTestNATS) ListMessages(context.Context, domain.MessageStatus, int, int, string, string) ([]*ports.NATSMessageItem, uint64, error) {
+	return nil, 0, nil
+}
+func (n *workerTestNATS) ListMessagesWithFilter(context.Context, domain.MessageStatus, int, int, ports.NATSMessageFilter) ([]*ports.NATSMessageItem, uint64, error) {
 	return nil, 0, nil
 }
 func (n *workerTestNATS) ListDLQMessages(context.Context, int, int) ([]*ports.NATSMessageItem, uint64, error) {
@@ -218,17 +234,15 @@ func TestApplySinkTableClearsSchemaWhenSinkTableUnqualified(t *testing.T) {
 
 type orderStore struct {
 	*mockStore
-	calls []string
-	err   error
+	calls      []string
+	err        error
+	checkpoint *domain.Checkpoint
 }
 
-func (s *orderStore) SaveCheckpoint(context.Context, *domain.Checkpoint) error {
+func (s *orderStore) SaveCheckpoint(_ context.Context, checkpoint *domain.Checkpoint) error {
 	s.calls = append(s.calls, "checkpoint")
+	s.checkpoint = checkpoint
 	return s.err
-}
-func (s *orderStore) SaveOffset(context.Context, string, string) error {
-	s.calls = append(s.calls, "offset")
-	return nil
 }
 
 func newOrderStore() *orderStore {
@@ -246,6 +260,7 @@ func (s orderSink) WriteBatch(context.Context, []*domain.Event) error {
 }
 func (s orderSink) Close() error       { return nil }
 func (s orderSink) InstanceID() string { return "sink-1" }
+func (s orderSink) Type() string       { return "postgres" }
 
 type isolatingSink struct {
 	calls int
@@ -262,8 +277,9 @@ func (s *isolatingSink) WriteBatch(_ context.Context, events []*domain.Event) er
 }
 func (s *isolatingSink) Close() error       { return nil }
 func (s *isolatingSink) InstanceID() string { return "sink-1" }
+func (s *isolatingSink) Type() string       { return "postgres" }
 
-func TestProcessBatchSavesCheckpointBeforeAck(t *testing.T) {
+func TestProcessBatchAcksBeforeSavingCheckpoint(t *testing.T) {
 	store := newOrderStore()
 	sinkCalls := &store.calls
 	worker := &FlowWorker{
@@ -274,14 +290,14 @@ func TestProcessBatchSavesCheckpointBeforeAck(t *testing.T) {
 		maxDeliver: 3,
 		log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
-	msg := &workerTestMsg{}
+	msg := &workerTestMsg{calls: sinkCalls}
 
 	worker.processBatch(context.Background(), []jetstream.Msg{msg})
 
 	if !msg.acked {
 		t.Fatal("message not acked after checkpoint")
 	}
-	want := []string{"sink", "checkpoint", "offset"}
+	want := []string{"sink", "ack", "checkpoint"}
 	if len(store.calls) != len(want) {
 		t.Fatalf("calls = %v, want %v", store.calls, want)
 	}
@@ -289,6 +305,12 @@ func TestProcessBatchSavesCheckpointBeforeAck(t *testing.T) {
 		if store.calls[i] != want[i] {
 			t.Fatalf("calls = %v, want %v", store.calls, want)
 		}
+	}
+	if store.checkpoint == nil {
+		t.Fatal("checkpoint was not saved")
+	}
+	if store.checkpoint.Schema != "public" || store.checkpoint.Table != "users" || store.checkpoint.Partition != 0 {
+		t.Fatalf("checkpoint metadata = %+v", store.checkpoint)
 	}
 }
 
@@ -326,7 +348,7 @@ func TestProcessBatchBisectsNonRetryableSinkBatchFailure(t *testing.T) {
 	}
 }
 
-func TestProcessBatchDoesNotAckWhenCheckpointFails(t *testing.T) {
+func TestProcessBatchKeepsAckWhenCheckpointFailsAfterSinkSuccess(t *testing.T) {
 	store := newOrderStore()
 	store.err = errors.New("checkpoint failed")
 	sinkCalls := &store.calls
@@ -338,11 +360,20 @@ func TestProcessBatchDoesNotAckWhenCheckpointFails(t *testing.T) {
 		maxDeliver: 3,
 		log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
-	msg := &workerTestMsg{}
+	msg := &workerTestMsg{calls: sinkCalls}
 
 	worker.processBatch(context.Background(), []jetstream.Msg{msg})
 
-	if msg.acked {
-		t.Fatal("message acked when checkpoint failed")
+	if !msg.acked {
+		t.Fatal("message not acked after sink success")
+	}
+	want := []string{"sink", "ack", "checkpoint"}
+	if len(store.calls) != len(want) {
+		t.Fatalf("calls = %v, want %v", store.calls, want)
+	}
+	for i := range want {
+		if store.calls[i] != want[i] {
+			t.Fatalf("calls = %v, want %v", store.calls, want)
+		}
 	}
 }

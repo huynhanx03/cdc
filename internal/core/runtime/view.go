@@ -90,23 +90,17 @@ func (v *View) SinkStats(sinkID string) ComponentStatsSnapshot {
 
 func (v *View) Dashboard() DashboardSnapshot {
 	var snapshot DashboardSnapshot
-	var latencyTotal int64
-	var latencyCount uint32
 	v.metrics.RangeFlows(func(_ string, stats FlowStatsSnapshot) bool {
 		snapshot.Throughput += stats.EventsPerSecond
 		snapshot.TotalSyncedEvents += stats.TotalEventsProcessed
 		snapshot.FailureCount += stats.FailureCount
-		if stats.ReplicationLagMs > 0 {
-			latencyTotal += stats.ReplicationLagMs
-			latencyCount++
+		if float64(stats.ReplicationLagMs) > snapshot.LatencyP99 {
+			snapshot.LatencyP99 = float64(stats.ReplicationLagMs)
 		}
 		return true
 	})
 	if total := snapshot.TotalSyncedEvents + snapshot.FailureCount; total > 0 {
 		snapshot.ErrorRate = float64(snapshot.FailureCount) / float64(total) * 100
-	}
-	if latencyCount > 0 {
-		snapshot.LatencyP99 = float64(latencyTotal) / float64(latencyCount)
 	}
 	if v.pools == nil || v.registry == nil {
 		return snapshot

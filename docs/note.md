@@ -1,8 +1,7 @@
   - NATS retention theo min checkpoint multi-flow
-  - public docs guarantee exactly-once/at-least-once đầy đủ
   - Postgres replica identity validation đầy đủ bằng integration DB
   - Flow create fail semantics/status ERROR
-  - typed ErrNotFound + gRPC/HTTP 404 taxonomy đầy đủ
+  - HTTP/REST public error taxonomy audit sâu hơn nếu không đi qua grpc-gateway mapping
   - ClickHouse/Elasticsearch correctness sâu hơn
   - storage list perf/cache/pagination
   - source decode worker pools/adaptive batching
@@ -13,3 +12,4 @@
   - security scanning/SBOM: cố ý out-of-scope
   - integration/chaos/HA/product/API/UI advanced items
   - Docker build chưa verify được do Docker daemon missing
+  - Frontend build/lint chưa verify được vì môi trường shell không có npm

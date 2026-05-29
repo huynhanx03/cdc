@@ -23,9 +23,7 @@ type Store interface {
 	GetFlow(ctx context.Context, flowID string) (*FlowConfig, error)
 	DeleteFlow(ctx context.Context, flowID string) error
 	ListFlows(ctx context.Context) ([]*FlowConfig, error)
-	// Offset
-	SaveOffset(ctx context.Context, flowID string, offset string) error
-	GetOffset(ctx context.Context, flowID string) (string, error)
+	// Checkpoints and source resume offsets
 	SaveCheckpoint(ctx context.Context, checkpoint *domain.Checkpoint) error
 	GetCheckpoint(ctx context.Context, flowID string) (*domain.Checkpoint, error)
 	SaveSourceOffset(ctx context.Context, sourceID string, offset string) error

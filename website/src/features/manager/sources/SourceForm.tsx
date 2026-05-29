@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useCallback, useState, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Database,
@@ -31,6 +31,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import {
+  SOURCE_CONNECTOR_TYPES,
+  connectorLabel,
+  defaultConnectorPort,
+  defaultConnectorUsername,
+} from '@/config/connectors';
 import type { SourceConfig, TestConnectionResponse } from '@/types/api';
 
 interface SourceFormProps {
@@ -50,13 +56,13 @@ export function SourceForm({ open, onOpenChange, sourceToEdit }: SourceFormProps
   const testMutation = useTestSourceConnection();
   const { data: configData } = useConfig();
 
-  // Only DB types for now
   const availableTypes = useMemo(() => {
-    const dbTypes = ['postgres', 'mysql'];
     if (configData?.available_sources && configData.available_sources.length > 0) {
-      return configData.available_sources.filter((t) => dbTypes.includes(t));
+      return configData.available_sources.filter((t): t is SourceConfig['type'] =>
+        SOURCE_CONNECTOR_TYPES.includes(t as SourceConfig['type']),
+      );
     }
-    return dbTypes;
+    return [...SOURCE_CONNECTOR_TYPES];
   }, [configData]);
 
   // Form State — simple DB connection only
@@ -71,13 +77,24 @@ export function SourceForm({ open, onOpenChange, sourceToEdit }: SourceFormProps
   // Connection testing state
   const [testResult, setTestResult] = useState<TestConnectionResponse | null>(null);
 
+  const resetForm = useCallback(() => {
+    setName('');
+    setType((availableTypes[0] || 'postgres') as SourceConfig['type']);
+    setHost('');
+    setPort(defaultConnectorPort(availableTypes[0] || 'postgres'));
+    setUsername('');
+    setPassword('');
+    setDatabase('');
+    setTestResult(null);
+  }, [availableTypes]);
+
   // Sync edit values
   useEffect(() => {
     if (sourceToEdit) {
       setName(sourceToEdit.name || '');
       setType(sourceToEdit.type || 'postgres');
       setHost(sourceToEdit.host || '');
-      setPort(sourceToEdit.port || (sourceToEdit.type === 'mysql' ? 3306 : 5432));
+      setPort(sourceToEdit.port || defaultConnectorPort(sourceToEdit.type));
       setUsername(sourceToEdit.username || '');
       setPassword(sourceToEdit.password || '');
       setDatabase(sourceToEdit.database || '');
@@ -85,27 +102,15 @@ export function SourceForm({ open, onOpenChange, sourceToEdit }: SourceFormProps
       resetForm();
     }
     setTestResult(null);
-  }, [sourceToEdit, open]);
+  }, [sourceToEdit, open, resetForm]);
 
   // Adjust port based on type
   useEffect(() => {
     if (!isEdit) {
-      if (type === 'postgres') setPort(5432);
-      else if (type === 'mysql') setPort(3306);
+      setPort(defaultConnectorPort(type));
     }
     setTestResult(null);
   }, [type, isEdit]);
-
-  const resetForm = () => {
-    setName('');
-    setType((availableTypes[0] || 'postgres') as SourceConfig['type']);
-    setHost('');
-    setPort(5432);
-    setUsername('');
-    setPassword('');
-    setDatabase('');
-    setTestResult(null);
-  };
 
   const parsePayload = (): Partial<SourceConfig> => {
     const payload: Partial<SourceConfig> = {
@@ -142,8 +147,8 @@ export function SourceForm({ open, onOpenChange, sourceToEdit }: SourceFormProps
         setTestResult(res);
         toast.error(t('manager.sources.testFailed') + `: ${res.message}`);
       }
-    } catch (err: any) {
-      toast.error(err.message || t('manager.sources.testFailed'));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t('manager.sources.testFailed'));
     }
   };
 
@@ -165,8 +170,8 @@ export function SourceForm({ open, onOpenChange, sourceToEdit }: SourceFormProps
         toast.success(t('common.success'));
       }
       onOpenChange(false);
-    } catch (err: any) {
-      toast.error(err.message || t('manager.sources.toast.deleteFailed'));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t('manager.sources.toast.deleteFailed'));
     }
   };
 
@@ -180,8 +185,8 @@ export function SourceForm({ open, onOpenChange, sourceToEdit }: SourceFormProps
           </DialogTitle>
           <DialogDescription className="text-xs text-muted-foreground">
             {isEdit
-              ? 'Update the database connection details for this source.'
-              : 'Register a database connection as a CDC source.'}
+              ? t('manager.sources.editDesc')
+              : t('manager.sources.createDesc')}
           </DialogDescription>
         </DialogHeader>
 
@@ -195,7 +200,7 @@ export function SourceForm({ open, onOpenChange, sourceToEdit }: SourceFormProps
               <Input
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="e.g. Production DB"
+                placeholder={t('manager.sources.placeholders.displayName')}
                 className="h-9 text-xs"
               />
             </div>
@@ -210,7 +215,7 @@ export function SourceForm({ open, onOpenChange, sourceToEdit }: SourceFormProps
                 <SelectContent>
                   {availableTypes.map((tName) => (
                     <SelectItem key={tName} value={tName} className="text-xs">
-                      {tName === 'postgres' ? 'PostgreSQL' : 'MySQL'}
+                      {connectorLabel(tName)}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -227,7 +232,7 @@ export function SourceForm({ open, onOpenChange, sourceToEdit }: SourceFormProps
               <Input
                 value={host}
                 onChange={(e) => setHost(e.target.value)}
-                placeholder="localhost"
+                placeholder={t('manager.sources.placeholders.host')}
                 className="h-9 text-xs"
                 required
               />
@@ -255,7 +260,7 @@ export function SourceForm({ open, onOpenChange, sourceToEdit }: SourceFormProps
               <Input
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                placeholder={type === 'postgres' ? 'postgres' : 'root'}
+                placeholder={defaultConnectorUsername(type)}
                 className="h-9 text-xs"
               />
             </div>
@@ -267,7 +272,9 @@ export function SourceForm({ open, onOpenChange, sourceToEdit }: SourceFormProps
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder={isEdit ? '••••••••' : 'password'}
+                placeholder={isEdit
+                  ? t('manager.sources.placeholders.editPassword')
+                  : t('manager.sources.placeholders.password')}
                 className="h-9 text-xs"
               />
             </div>
@@ -278,7 +285,7 @@ export function SourceForm({ open, onOpenChange, sourceToEdit }: SourceFormProps
               <Input
                 value={database}
                 onChange={(e) => setDatabase(e.target.value)}
-                placeholder="my_database"
+                placeholder={t('manager.sources.placeholders.database')}
                 className="h-9 text-xs"
                 required
               />

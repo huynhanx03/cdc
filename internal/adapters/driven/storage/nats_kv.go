@@ -10,6 +10,7 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/foden/cdc/internal/core/domain"
 	"github.com/foden/cdc/internal/core/ports"
+	cdcerrors "github.com/foden/cdc/pkg/errors"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -52,7 +53,7 @@ func (s *NATSKVStore) GetSource(ctx context.Context, instanceID string) (*ports.
 	entry, err := s.bucket.Get(ctx, key)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return nil, fmt.Errorf("storage: source %q not found", instanceID)
+			return nil, fmt.Errorf("%w: storage source %q", cdcerrors.ErrNotFound, instanceID)
 		}
 		return nil, fmt.Errorf("storage: get source %q: %w", instanceID, err)
 	}
@@ -67,7 +68,7 @@ func (s *NATSKVStore) DeleteSource(ctx context.Context, instanceID string) error
 	key := PrefixSources + instanceID
 	if err := s.bucket.Delete(ctx, key); err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return fmt.Errorf("storage: source %q not found", instanceID)
+			return fmt.Errorf("%w: storage source %q", cdcerrors.ErrNotFound, instanceID)
 		}
 		return fmt.Errorf("storage: delete source %q: %w", instanceID, err)
 	}
@@ -123,7 +124,7 @@ func (s *NATSKVStore) GetSink(ctx context.Context, instanceID string) (*ports.Si
 	entry, err := s.bucket.Get(ctx, key)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return nil, fmt.Errorf("storage: sink %q not found", instanceID)
+			return nil, fmt.Errorf("%w: storage sink %q", cdcerrors.ErrNotFound, instanceID)
 		}
 		return nil, fmt.Errorf("storage: get sink %q: %w", instanceID, err)
 	}
@@ -138,7 +139,7 @@ func (s *NATSKVStore) DeleteSink(ctx context.Context, instanceID string) error {
 	key := PrefixSinks + instanceID
 	if err := s.bucket.Delete(ctx, key); err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return fmt.Errorf("storage: sink %q not found", instanceID)
+			return fmt.Errorf("%w: storage sink %q", cdcerrors.ErrNotFound, instanceID)
 		}
 		return fmt.Errorf("storage: delete sink %q: %w", instanceID, err)
 	}
@@ -194,7 +195,7 @@ func (s *NATSKVStore) GetFlow(ctx context.Context, flowID string) (*ports.FlowCo
 	entry, err := s.bucket.Get(ctx, key)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return nil, fmt.Errorf("storage: flow %q not found", flowID)
+			return nil, fmt.Errorf("%w: storage flow %q", cdcerrors.ErrNotFound, flowID)
 		}
 		return nil, fmt.Errorf("storage: get flow %q: %w", flowID, err)
 	}
@@ -209,7 +210,7 @@ func (s *NATSKVStore) DeleteFlow(ctx context.Context, flowID string) error {
 	key := PrefixFlows + flowID
 	if err := s.bucket.Delete(ctx, key); err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return fmt.Errorf("storage: flow %q not found", flowID)
+			return fmt.Errorf("%w: storage flow %q", cdcerrors.ErrNotFound, flowID)
 		}
 		return fmt.Errorf("storage: delete flow %q: %w", flowID, err)
 	}
@@ -246,27 +247,7 @@ func (s *NATSKVStore) ListFlows(ctx context.Context) ([]*ports.FlowConfig, error
 	return flows, nil
 }
 
-// --- Offset ---
-
-func (s *NATSKVStore) SaveOffset(ctx context.Context, flowID string, offset string) error {
-	key := PrefixOffsets + flowID
-	if _, err := s.bucket.Put(ctx, key, []byte(offset)); err != nil {
-		return fmt.Errorf("storage: save offset for flow %q: %w", flowID, err)
-	}
-	return nil
-}
-
-func (s *NATSKVStore) GetOffset(ctx context.Context, flowID string) (string, error) {
-	key := PrefixOffsets + flowID
-	entry, err := s.bucket.Get(ctx, key)
-	if err != nil {
-		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return "", nil // No offset yet is not an error
-		}
-		return "", fmt.Errorf("storage: get offset for flow %q: %w", flowID, err)
-	}
-	return string(entry.Value()), nil
-}
+// --- Checkpoints and source offsets ---
 
 func (s *NATSKVStore) SaveCheckpoint(ctx context.Context, checkpoint *domain.Checkpoint) error {
 	if checkpoint == nil {
@@ -282,7 +263,10 @@ func (s *NATSKVStore) SaveCheckpoint(ctx context.Context, checkpoint *domain.Che
 	if err != nil {
 		return fmt.Errorf("storage: marshal checkpoint for flow %q: %w", checkpoint.FlowID, err)
 	}
-	key := "checkpoint." + checkpoint.FlowID
+	key, err := CheckpointKey(checkpoint)
+	if err != nil {
+		return fmt.Errorf("storage: checkpoint key for flow %q: %w", checkpoint.FlowID, err)
+	}
 	if _, err := s.bucket.Put(ctx, key, data); err != nil {
 		return fmt.Errorf("storage: save checkpoint for flow %q: %w", checkpoint.FlowID, err)
 	}
@@ -290,8 +274,7 @@ func (s *NATSKVStore) SaveCheckpoint(ctx context.Context, checkpoint *domain.Che
 }
 
 func (s *NATSKVStore) GetCheckpoint(ctx context.Context, flowID string) (*domain.Checkpoint, error) {
-	key := "checkpoint." + flowID
-	entry, err := s.bucket.Get(ctx, key)
+	entry, err := s.latestCheckpointEntry(ctx, flowID)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
 			return nil, nil
@@ -303,6 +286,36 @@ func (s *NATSKVStore) GetCheckpoint(ctx context.Context, flowID string) (*domain
 		return nil, fmt.Errorf("storage: unmarshal checkpoint for flow %q: %w", flowID, err)
 	}
 	return &checkpoint, nil
+}
+
+func (s *NATSKVStore) latestCheckpointEntry(ctx context.Context, flowID string) (jetstream.KeyValueEntry, error) {
+	keys, err := s.bucket.Keys(ctx)
+	if err != nil && !errors.Is(err, jetstream.ErrNoKeysFound) {
+		return nil, fmt.Errorf("storage: list checkpoint keys: %w", err)
+	}
+
+	prefix := PrefixCheckpoints + flowID + "."
+	var latest jetstream.KeyValueEntry
+	for _, key := range keys {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		entry, err := s.bucket.Get(ctx, key)
+		if err != nil {
+			if errors.Is(err, jetstream.ErrKeyNotFound) {
+				continue
+			}
+			return nil, fmt.Errorf("storage: get checkpoint key %q: %w", key, err)
+		}
+		if latest == nil || entry.Created().After(latest.Created()) {
+			latest = entry
+		}
+	}
+	if latest != nil {
+		return latest, nil
+	}
+
+	return s.bucket.Get(ctx, LegacyCheckpointKey(flowID))
 }
 
 func (s *NATSKVStore) SaveSourceOffset(ctx context.Context, sourceID string, offset string) error {
@@ -376,7 +389,7 @@ func (s *NATSKVStore) GetSourceWithRevision(ctx context.Context, instanceID stri
 	entry, err := s.bucket.Get(ctx, key)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return nil, 0, fmt.Errorf("storage: source %q not found", instanceID)
+			return nil, 0, fmt.Errorf("%w: storage source %q", cdcerrors.ErrNotFound, instanceID)
 		}
 		return nil, 0, fmt.Errorf("storage: get source %q: %w", instanceID, err)
 	}
@@ -393,7 +406,7 @@ func (s *NATSKVStore) GetSinkWithRevision(ctx context.Context, instanceID string
 	entry, err := s.bucket.Get(ctx, key)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return nil, 0, fmt.Errorf("storage: sink %q not found", instanceID)
+			return nil, 0, fmt.Errorf("%w: storage sink %q", cdcerrors.ErrNotFound, instanceID)
 		}
 		return nil, 0, fmt.Errorf("storage: get sink %q: %w", instanceID, err)
 	}
@@ -410,7 +423,7 @@ func (s *NATSKVStore) GetFlowWithRevision(ctx context.Context, flowID string) (*
 	entry, err := s.bucket.Get(ctx, key)
 	if err != nil {
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return nil, 0, fmt.Errorf("storage: flow %q not found", flowID)
+			return nil, 0, fmt.Errorf("%w: storage flow %q", cdcerrors.ErrNotFound, flowID)
 		}
 		return nil, 0, fmt.Errorf("storage: get flow %q: %w", flowID, err)
 	}

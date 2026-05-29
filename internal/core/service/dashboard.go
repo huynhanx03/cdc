@@ -21,6 +21,12 @@ type DashboardService struct {
 	startTime   time.Time
 }
 
+const (
+	defaultDashboardP99Window       = "5m"
+	dashboardPrometheusQueryTimeout = 2 * time.Second
+	dashboardNATSHealthTimeout      = 750 * time.Millisecond
+)
+
 func NewDashboardService(
 	store ports.Store,
 	flowManager ports.FlowManager,
@@ -33,7 +39,7 @@ func NewDashboardService(
 		runtimeView = coreruntime.DefaultView()
 	}
 	if p99Window == "" {
-		p99Window = "5m"
+		p99Window = defaultDashboardP99Window
 	}
 	return &DashboardService{
 		store:       store,
@@ -105,7 +111,7 @@ func (s *DashboardService) getLatencyP99(ctx context.Context, fallback float64) 
 	if s.metrics == nil {
 		return fallback
 	}
-	queryCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	queryCtx, cancel := context.WithTimeout(ctx, dashboardPrometheusQueryTimeout)
 	defer cancel()
 	value, err := s.metrics.FlowProcessingLatencyP99(queryCtx, s.p99Window)
 	if err != nil {
@@ -119,7 +125,7 @@ func (s *DashboardService) isNATSHealthy(ctx context.Context) bool {
 	if s.natsClient == nil {
 		return false
 	}
-	healthCtx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
+	healthCtx, cancel := context.WithTimeout(ctx, dashboardNATSHealthTimeout)
 	defer cancel()
 	if err := s.natsClient.Health(healthCtx); err != nil {
 		slog.Warn("dashboard telemetry: nats health unavailable", "err", err)

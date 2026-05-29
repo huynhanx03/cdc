@@ -35,7 +35,8 @@ type componentStats struct {
 	failed         atomic.Uint64
 	throughputBits atomic.Uint64
 	lastEventAt    atomic.Int64
-	lastLatency    atomic.Int64
+	latencyTotal   atomic.Int64
+	latencySamples atomic.Uint64
 	lastErr        atomic.Value
 }
 
@@ -125,7 +126,7 @@ func (m *Metrics) RecordSinkWrite(flowID, sourceID, sinkID string, count uint64,
 	sink := m.sinkStats(sinkID)
 	sink.success.Add(count)
 	recordThroughput(&sink.throughputBits, &sink.lastEventAt, count, now)
-	sink.lastLatency.Store(writeLatencyMs)
+	recordLatency(&sink.latencyTotal, &sink.latencySamples, writeLatencyMs)
 }
 
 func (m *Metrics) RecordFlowFailure(flowID, sourceID, sinkID, errorType, message string, count uint64) {
@@ -272,7 +273,7 @@ func componentSnapshot(stats *componentStats) ComponentStatsSnapshot {
 		LastEventAt:  stats.lastEventAt.Load(),
 		Throughput:   loadFloat64(stats.throughputBits),
 		ErrorRate:    errorRate,
-		AvgLatencyMs: stats.lastLatency.Load(),
+		AvgLatencyMs: averageLatency(stats.latencyTotal.Load(), stats.latencySamples.Load()),
 	}
 }
 
@@ -287,6 +288,21 @@ func recordThroughput(bits *atomic.Uint64, lastAt *atomic.Int64, count uint64, n
 	}
 	eventsPerSecond := float64(count) * 1000 / float64(nowMs-prev)
 	bits.Store(math.Float64bits(eventsPerSecond))
+}
+
+func recordLatency(total *atomic.Int64, samples *atomic.Uint64, latencyMs int64) {
+	if latencyMs < 0 {
+		return
+	}
+	total.Add(latencyMs)
+	samples.Add(1)
+}
+
+func averageLatency(total int64, samples uint64) int64 {
+	if samples == 0 {
+		return 0
+	}
+	return total / int64(samples)
 }
 
 func loadFloat64(value atomic.Uint64) float64 {

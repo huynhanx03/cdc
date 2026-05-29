@@ -51,6 +51,9 @@ func (s *CDCService) ListSources(ctx context.Context, req *cdcpb.ListSourcesRequ
 
 func (s *CDCService) DeleteSource(ctx context.Context, req *cdcpb.DeleteSourceRequest) (*cdcpb.DeleteSourceResponse, error) {
 	result, err := s.sourceService.Delete(ctx, request.DeleteSourceRequest{InstanceID: req.InstanceId})
+	if grpcErr := invalidArgumentIfRequired(err); grpcErr != nil {
+		return nil, grpcErr
+	}
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to delete source: %v", err)
 	}

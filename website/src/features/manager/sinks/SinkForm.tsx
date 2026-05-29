@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useCallback, useState, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   HardDrive,
@@ -31,6 +31,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import {
+  SINK_CONNECTOR_TYPES,
+  connectorLabel,
+  defaultConnectorPort,
+  defaultConnectorUsername,
+} from '@/config/connectors';
 import type { SinkConfig, TestConnectionResponse } from '@/types/api';
 
 interface SinkFormProps {
@@ -50,13 +56,13 @@ export function SinkForm({ open, onOpenChange, sinkToEdit }: SinkFormProps) {
   const testMutation = useTestSinkConnection();
   const { data: configData } = useConfig();
 
-  // Backend-supported sink connectors.
   const availableTypes = useMemo(() => {
-    const supportedTypes = ['postgres', 'mysql', 'elasticsearch', 'clickhouse'];
     if (configData?.available_sinks && configData.available_sinks.length > 0) {
-      return configData.available_sinks.filter((t) => supportedTypes.includes(t));
+      return configData.available_sinks.filter((t): t is SinkConfig['type'] =>
+        SINK_CONNECTOR_TYPES.includes(t as SinkConfig['type']),
+      );
     }
-    return supportedTypes;
+    return [...SINK_CONNECTOR_TYPES];
   }, [configData]);
 
   // Form State — mirrors SinkConfig from the backend API.
@@ -74,13 +80,27 @@ export function SinkForm({ open, onOpenChange, sinkToEdit }: SinkFormProps) {
   // Connection testing state
   const [testResult, setTestResult] = useState<TestConnectionResponse | null>(null);
 
+  const resetForm = useCallback(() => {
+    setName('');
+    setType((availableTypes[0] || 'postgres') as SinkConfig['type']);
+    setHost('');
+    setPort(defaultConnectorPort(availableTypes[0] || 'postgres'));
+    setUsername('');
+    setPassword('');
+    setDatabase('');
+    setUrls('');
+    setApiKey('');
+    setIndexPrefix('');
+    setTestResult(null);
+  }, [availableTypes]);
+
   // Sync edit values
   useEffect(() => {
     if (sinkToEdit) {
       setName(sinkToEdit.name || '');
       setType(sinkToEdit.type || 'postgres');
       setHost(sinkToEdit.host || '');
-      setPort(sinkToEdit.port || (sinkToEdit.type === 'clickhouse' ? 9000 : sinkToEdit.type === 'mysql' ? 3306 : 5432));
+      setPort(sinkToEdit.port || defaultConnectorPort(sinkToEdit.type));
       setUsername(sinkToEdit.username || '');
       setPassword(sinkToEdit.password || '');
       setDatabase(sinkToEdit.database || '');
@@ -91,31 +111,15 @@ export function SinkForm({ open, onOpenChange, sinkToEdit }: SinkFormProps) {
       resetForm();
     }
     setTestResult(null);
-  }, [sinkToEdit, open]);
+  }, [sinkToEdit, open, resetForm]);
 
   // Adjust port based on type
   useEffect(() => {
     if (!isEdit) {
-      if (type === 'postgres') setPort(5432);
-      else if (type === 'mysql') setPort(3306);
-      else if (type === 'clickhouse') setPort(9000);
+      setPort(defaultConnectorPort(type));
     }
     setTestResult(null);
   }, [type, isEdit]);
-
-  const resetForm = () => {
-    setName('');
-    setType((availableTypes[0] || 'postgres') as SinkConfig['type']);
-    setHost('');
-    setPort(5432);
-    setUsername('');
-    setPassword('');
-    setDatabase('');
-    setUrls('');
-    setApiKey('');
-    setIndexPrefix('');
-    setTestResult(null);
-  };
 
   const parsePayload = (): Partial<SinkConfig> => {
     const payload: Partial<SinkConfig> = { type, name: name || undefined };
@@ -164,8 +168,8 @@ export function SinkForm({ open, onOpenChange, sinkToEdit }: SinkFormProps) {
         setTestResult(res);
         toast.error(t('manager.sinks.testFailed') + `: ${res.message}`);
       }
-    } catch (err: any) {
-      toast.error(err.message || t('manager.sinks.testFailed'));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t('manager.sinks.testFailed'));
     }
   };
 
@@ -192,8 +196,8 @@ export function SinkForm({ open, onOpenChange, sinkToEdit }: SinkFormProps) {
         toast.success(t('common.success'));
       }
       onOpenChange(false);
-    } catch (err: any) {
-      toast.error(err.message || t('manager.sinks.toast.deleteFailed'));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t('manager.sinks.toast.deleteFailed'));
     }
   };
 
@@ -207,8 +211,8 @@ export function SinkForm({ open, onOpenChange, sinkToEdit }: SinkFormProps) {
           </DialogTitle>
           <DialogDescription className="text-xs text-muted-foreground">
             {isEdit
-              ? 'Update the database connection details for this sink.'
-              : 'Register a target database connection as a CDC sink.'}
+              ? t('manager.sinks.editDesc')
+              : t('manager.sinks.createDesc')}
           </DialogDescription>
         </DialogHeader>
 
@@ -222,7 +226,7 @@ export function SinkForm({ open, onOpenChange, sinkToEdit }: SinkFormProps) {
               <Input
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="e.g. Analytics DB"
+                placeholder={t('manager.sinks.placeholders.displayName')}
                 className="h-9 text-xs"
               />
             </div>
@@ -237,13 +241,7 @@ export function SinkForm({ open, onOpenChange, sinkToEdit }: SinkFormProps) {
                 <SelectContent>
                   {availableTypes.map((tName) => (
                     <SelectItem key={tName} value={tName} className="text-xs">
-                      {tName === 'postgres'
-                        ? 'PostgreSQL'
-                        : tName === 'mysql'
-                          ? 'MySQL'
-                        : tName === 'elasticsearch'
-                          ? 'Elasticsearch'
-                          : 'ClickHouse'}
+                      {connectorLabel(tName)}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -302,7 +300,7 @@ export function SinkForm({ open, onOpenChange, sinkToEdit }: SinkFormProps) {
                   <Input
                     value={host}
                     onChange={(e) => setHost(e.target.value)}
-                    placeholder="localhost"
+                    placeholder={t('manager.sinks.placeholders.host')}
                     className="h-9 text-xs"
                     required
                   />
@@ -330,7 +328,7 @@ export function SinkForm({ open, onOpenChange, sinkToEdit }: SinkFormProps) {
                   <Input
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
-                    placeholder={type === 'postgres' ? 'postgres' : type === 'mysql' ? 'root' : 'default'}
+                    placeholder={defaultConnectorUsername(type)}
                     className="h-9 text-xs"
                   />
                 </div>
@@ -342,7 +340,9 @@ export function SinkForm({ open, onOpenChange, sinkToEdit }: SinkFormProps) {
                     type="password"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    placeholder={isEdit ? '••••••••' : 'password'}
+                    placeholder={isEdit
+                      ? t('manager.sinks.placeholders.editPassword')
+                      : t('manager.sinks.placeholders.password')}
                     className="h-9 text-xs"
                   />
                 </div>
@@ -353,7 +353,7 @@ export function SinkForm({ open, onOpenChange, sinkToEdit }: SinkFormProps) {
                   <Input
                     value={database}
                     onChange={(e) => setDatabase(e.target.value)}
-                    placeholder="my_database"
+                    placeholder={t('manager.sinks.placeholders.database')}
                     className="h-9 text-xs"
                     required
                   />

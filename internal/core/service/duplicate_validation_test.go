@@ -2,12 +2,15 @@ package service
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/foden/cdc/internal/core/domain"
 	"github.com/foden/cdc/internal/core/dto/request"
 	"github.com/foden/cdc/internal/core/ports"
+	cdcerrors "github.com/foden/cdc/pkg/errors"
 )
 
 type serviceTestStore struct {
@@ -29,9 +32,16 @@ func (s *serviceTestStore) PutSource(_ context.Context, cfg *ports.SourceConfig)
 	return nil
 }
 func (s *serviceTestStore) GetSource(_ context.Context, id string) (*ports.SourceConfig, error) {
-	return s.sources[id], nil
+	source := s.sources[id]
+	if source == nil {
+		return nil, fmt.Errorf("%w: source %q", cdcerrors.ErrNotFound, id)
+	}
+	return source, nil
 }
 func (s *serviceTestStore) DeleteSource(_ context.Context, id string) error {
+	if s.sources[id] == nil {
+		return fmt.Errorf("%w: source %q", cdcerrors.ErrNotFound, id)
+	}
 	delete(s.sources, id)
 	return nil
 }
@@ -47,9 +57,16 @@ func (s *serviceTestStore) PutSink(_ context.Context, cfg *ports.SinkConfig) err
 	return nil
 }
 func (s *serviceTestStore) GetSink(_ context.Context, id string) (*ports.SinkConfig, error) {
-	return s.sinks[id], nil
+	sink := s.sinks[id]
+	if sink == nil {
+		return nil, fmt.Errorf("%w: sink %q", cdcerrors.ErrNotFound, id)
+	}
+	return sink, nil
 }
 func (s *serviceTestStore) DeleteSink(_ context.Context, id string) error {
+	if s.sinks[id] == nil {
+		return fmt.Errorf("%w: sink %q", cdcerrors.ErrNotFound, id)
+	}
 	delete(s.sinks, id)
 	return nil
 }
@@ -65,9 +82,16 @@ func (s *serviceTestStore) PutFlow(_ context.Context, cfg *ports.FlowConfig) err
 	return nil
 }
 func (s *serviceTestStore) GetFlow(_ context.Context, id string) (*ports.FlowConfig, error) {
-	return s.flows[id], nil
+	flow := s.flows[id]
+	if flow == nil {
+		return nil, fmt.Errorf("%w: flow %q", cdcerrors.ErrNotFound, id)
+	}
+	return flow, nil
 }
 func (s *serviceTestStore) DeleteFlow(_ context.Context, id string) error {
+	if s.flows[id] == nil {
+		return fmt.Errorf("%w: flow %q", cdcerrors.ErrNotFound, id)
+	}
 	delete(s.flows, id)
 	return nil
 }
@@ -77,12 +101,6 @@ func (s *serviceTestStore) ListFlows(_ context.Context) ([]*ports.FlowConfig, er
 		result = append(result, flow)
 	}
 	return result, nil
-}
-func (s *serviceTestStore) SaveOffset(context.Context, string, string) error {
-	return nil
-}
-func (s *serviceTestStore) GetOffset(context.Context, string) (string, error) {
-	return "", nil
 }
 func (s *serviceTestStore) SaveCheckpoint(context.Context, *domain.Checkpoint) error {
 	return nil
@@ -108,6 +126,26 @@ func TestSourceCreateRejectsDuplicateInstanceID(t *testing.T) {
 
 	if err == nil || !strings.Contains(err.Error(), "source instance_id") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestSourceGetMissingReturnsTypedNotFound(t *testing.T) {
+	svc := NewSourceService(newServiceTestStore(), nil)
+
+	_, err := svc.Get(context.Background(), request.GetSourceRequest{InstanceID: "missing"})
+
+	if !errors.Is(err, cdcerrors.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestSinkDeleteMissingReturnsTypedNotFound(t *testing.T) {
+	svc := NewSinkService(newServiceTestStore(), nil)
+
+	_, err := svc.Delete(context.Background(), request.DeleteSinkRequest{InstanceID: "missing"})
+
+	if !errors.Is(err, cdcerrors.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 }
 

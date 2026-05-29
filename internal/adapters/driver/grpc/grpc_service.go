@@ -87,22 +87,55 @@ func (s *CDCService) GetStats(ctx context.Context, req *cdcpb.GetStatsRequest) (
 // DLQ
 // ============================================================
 
-// ReprocessDLQ triggers reprocessing of messages in the dead letter queue.
-// The NATSClient.ReprocessDLQ method requires a handler function; since we
-// only need a count, we use a no-op handler that accepts all events.
+func (s *CDCService) PreviewDLQReprocess(ctx context.Context, req *cdcpb.PreviewDLQReprocessRequest) (*cdcpb.PreviewDLQReprocessResponse, error) {
+	result, err := s.dlqService.PreviewReprocess(ctx, request.DLQDryRunRequest{
+		SelectedDLQIDs: req.GetSelectedDlqIds(),
+		Filter:         dlqFilterFromProto(req.GetFilter()),
+		MaxCount:       req.GetMaxCount(),
+	})
+	if err != nil {
+		slog.Error("PreviewDLQReprocess: failed to preview DLQ reprocess", "err", err)
+		return nil, status.Errorf(codes.Internal, "failed to preview DLQ reprocess: %v", err)
+	}
+	return &cdcpb.PreviewDLQReprocessResponse{
+		SelectedCount: result.SelectedCount,
+		PreviewCount:  result.PreviewCount,
+		BlockedCount:  result.BlockedCount,
+		PreviewItems:  dlqDryRunPreviewToProto(result.PreviewItems),
+		ConfirmToken:  result.ConfirmToken,
+		Warnings:      result.Warnings,
+	}, nil
+}
+
+// ReprocessDLQ triggers guarded reprocessing of selected DLQ messages.
 func (s *CDCService) ReprocessDLQ(ctx context.Context, req *cdcpb.ReprocessDLQRequest) (*cdcpb.ReprocessDLQResponse, error) {
-	result, err := s.dlqService.Reprocess(ctx, request.ReprocessDLQRequest{})
+	result, err := s.dlqService.Reprocess(ctx, request.ReprocessDLQRequest{
+		SelectedDLQIDs: req.GetSelectedDlqIds(),
+		Filter:         dlqFilterFromProto(req.GetFilter()),
+		ConfirmToken:   req.GetConfirmToken(),
+		DryRun:         req.GetDryRun(),
+		MaxCount:       req.GetMaxCount(),
+	})
 	if err != nil {
 		slog.Error("ReprocessDLQ: failed to reprocess DLQ", "err", err)
 		return nil, status.Errorf(codes.Internal, "failed to reprocess DLQ: %v", err)
 	}
 
-	return &cdcpb.ReprocessDLQResponse{Count: result.Count}, nil
+	return &cdcpb.ReprocessDLQResponse{
+		Count:             result.Count,
+		ReprocessedDlqIds: result.ReprocessedDLQIDs,
+		SkippedDlqIds:     result.SkippedDLQIDs,
+		FailedDlqIds:      result.FailedDLQIDs,
+		DryRun:            result.DryRun,
+	}, nil
 }
 
 func invalidArgumentIfRequired(err error) error {
 	if errors.Is(err, cdcerrors.ErrSourceConfigRequired) || errors.Is(err, cdcerrors.ErrSinkConfigRequired) {
 		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	if errors.Is(err, cdcerrors.ErrNotFound) {
+		return status.Error(codes.NotFound, err.Error())
 	}
 	if errors.Is(err, cdcerrors.ErrDuplicateConfig) {
 		return status.Error(codes.AlreadyExists, err.Error())

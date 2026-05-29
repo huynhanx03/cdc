@@ -26,6 +26,7 @@ type FlowSink interface {
 	WriteBatch(ctx context.Context, events []*domain.Event) error
 	Close() error
 	InstanceID() string
+	Type() string
 }
 
 // SinkProvider is a callback that resolves a sink instance by its ID.
@@ -39,6 +40,13 @@ const (
 	FlowStatusRunning = ports.FlowStatusRunning
 	FlowStatusPaused  = ports.FlowStatusPaused
 	FlowStatusError   = ports.FlowStatusError
+)
+
+const (
+	sourceEventBufferSize      = 8192
+	sourceAckBufferSize        = 1024
+	sourcePublishBatchSize     = 100
+	sourcePublishFlushInterval = 100 * time.Millisecond
 )
 
 // FlowOptions is a type alias for ports.FlowOptions.
@@ -541,7 +549,6 @@ func (m *Manager) ResumeFlow(ctx context.Context, flowID string) (*ports.FlowCon
 		return nil, fmt.Errorf("failed to acquire sink instance: %w", err)
 	}
 
-	// Start new FlowWorker (resumes from last offset via store.GetOffset)
 	m.startWorker(flow, sink)
 	if srcCfg, err := m.store.GetSource(ctx, flow.SourceID); err == nil && srcCfg != nil {
 		if err := m.reconcileSourceTables(ctx, srcCfg); err != nil {
@@ -592,9 +599,6 @@ func (m *Manager) DeleteFlow(ctx context.Context, flowID string) error {
 			m.log.Error("failed to reconcile source tables on delete", "flow_id", flowID, "err", syncErr)
 		}
 	}
-
-	// Delete offset from store (save empty to clear)
-	_ = m.store.SaveOffset(ctx, flowID, "")
 
 	m.log.Info("flow deleted", "flow_id", flowID)
 	return nil
@@ -808,8 +812,8 @@ func (m *Manager) ensureSourceRunning(ctx context.Context, cfg *ports.SourceConf
 	runCtx, cancel := context.WithCancel(context.Background())
 	runtime := &sourceRuntime{
 		source: src,
-		events: make(chan *domain.Event, 8192),
-		acks:   make(chan ports.SourceAck, 1024),
+		events: make(chan *domain.Event, sourceEventBufferSize),
+		acks:   make(chan ports.SourceAck, sourceAckBufferSize),
 		cancel: cancel,
 		done:   make(chan struct{}),
 	}
@@ -854,8 +858,8 @@ func (m *Manager) ensureSourceRunning(ctx context.Context, cfg *ports.SourceConf
 func (m *Manager) publishSourceEvents(ctx context.Context, sourceID string, events <-chan *domain.Event, done chan<- struct{}) {
 	defer close(done)
 
-	batch := make([]*domain.Event, 0, 100)
-	timer := time.NewTimer(100 * time.Millisecond)
+	batch := make([]*domain.Event, 0, sourcePublishBatchSize)
+	timer := time.NewTimer(sourcePublishFlushInterval)
 	defer timer.Stop()
 
 	flush := func() {
@@ -930,7 +934,7 @@ func (m *Manager) publishSourceEvents(ctx context.Context, sourceID string, even
 				continue
 			}
 			batch = append(batch, ev)
-			if len(batch) >= 100 {
+			if len(batch) >= sourcePublishBatchSize {
 				flush()
 				if !timer.Stop() {
 					select {
@@ -938,11 +942,11 @@ func (m *Manager) publishSourceEvents(ctx context.Context, sourceID string, even
 					default:
 					}
 				}
-				timer.Reset(100 * time.Millisecond)
+				timer.Reset(sourcePublishFlushInterval)
 			}
 		case <-timer.C:
 			flush()
-			timer.Reset(100 * time.Millisecond)
+			timer.Reset(sourcePublishFlushInterval)
 		}
 	}
 }
@@ -1030,4 +1034,8 @@ func (a *sinkAdapter) Close() error {
 
 func (a *sinkAdapter) InstanceID() string {
 	return a.sink.InstanceID()
+}
+
+func (a *sinkAdapter) Type() string {
+	return a.sink.Type()
 }

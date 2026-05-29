@@ -1,7 +1,9 @@
 package nats
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -91,9 +93,62 @@ func (c *Client) MoveToDLQ(ctx context.Context, msg jetstream.Msg, opts ports.DL
 }
 
 func (c *Client) ReprocessDLQ(ctx context.Context) (int, error) {
+	result, err := c.ReprocessDLQSelected(ctx, nil, ports.DLQFilter{}, 100)
+	if err != nil {
+		return 0, err
+	}
+	return result.Count, nil
+}
+
+func (c *Client) PreviewDLQ(ctx context.Context, ids []string, filter ports.DLQFilter, maxCount uint32) ([]ports.DLQPreviewItem, error) {
 	stream, err := c.js.Stream(ctx, c.dlqStreamName())
 	if err != nil {
-		return 0, fmt.Errorf("failed to bind DLQ stream %s: %w", c.dlqStreamName(), err)
+		return nil, fmt.Errorf("failed to bind DLQ stream %s: %w", c.dlqStreamName(), err)
+	}
+
+	consumer, err := stream.CreateConsumer(ctx, jetstream.ConsumerConfig{
+		FilterSubjects:    []string{"dlq.>"},
+		AckPolicy:         jetstream.AckNonePolicy,
+		ReplayPolicy:      jetstream.ReplayInstantPolicy,
+		InactiveThreshold: 10 * time.Second,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to setup DLQ preview consumer: %w", err)
+	}
+
+	fetchCount := int(maxCount)
+	if fetchCount <= 0 || fetchCount > 100 {
+		fetchCount = 100
+	}
+	batch, err := consumer.Fetch(fetchCount, jetstream.FetchMaxWait(time.Second))
+	if err != nil {
+		return nil, err
+	}
+
+	selected := idSet(ids)
+	items := make([]ports.DLQPreviewItem, 0, fetchCount)
+	for msg := range batch.Messages() {
+		env, err := decodeDLQEnvelope(msg)
+		if err != nil || !dlqEnvelopeMatches(env, selected, filter) {
+			continue
+		}
+		item := dlqPreviewItem(env)
+		if meta, err := msg.Metadata(); err == nil && meta != nil {
+			item.MessageSequence = meta.Sequence.Stream
+			item.MessageTimestamp = meta.Timestamp.UnixMilli()
+		}
+		items = append(items, item)
+		if len(items) >= fetchCount {
+			break
+		}
+	}
+	return items, nil
+}
+
+func (c *Client) ReprocessDLQSelected(ctx context.Context, ids []string, filter ports.DLQFilter, maxCount uint32) (ports.DLQReprocessResult, error) {
+	stream, err := c.js.Stream(ctx, c.dlqStreamName())
+	if err != nil {
+		return ports.DLQReprocessResult{}, fmt.Errorf("failed to bind DLQ stream %s: %w", c.dlqStreamName(), err)
 	}
 
 	consumer, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
@@ -106,25 +161,35 @@ func (c *Client) ReprocessDLQ(ctx context.Context) (int, error) {
 		ReplayPolicy:   jetstream.ReplayInstantPolicy,
 	})
 	if err != nil {
-		return 0, fmt.Errorf("failed to setup DLQ consumer: %w", err)
+		return ports.DLQReprocessResult{}, fmt.Errorf("failed to setup DLQ consumer: %w", err)
 	}
 
-	batch, err := consumer.Fetch(100, jetstream.FetchMaxWait(time.Second))
+	fetchCount := int(maxCount)
+	if fetchCount <= 0 || fetchCount > 100 {
+		fetchCount = 100
+	}
+	batch, err := consumer.Fetch(fetchCount, jetstream.FetchMaxWait(time.Second))
 	if err != nil {
-		return 0, err
+		return ports.DLQReprocessResult{}, err
 	}
 
-	successCount := 0
+	selected := idSet(ids)
+	result := ports.DLQReprocessResult{}
 	for msg := range batch.Messages() {
-		var env DLQEnvelope
-		if err := json.Unmarshal(msg.Data(), &env); err != nil {
+		env, err := decodeDLQEnvelope(msg)
+		if err != nil {
 			_ = msg.TermWithReason("invalid DLQ envelope: " + err.Error())
+			continue
+		}
+		if !dlqEnvelopeMatches(env, selected, filter) {
+			result.SkippedDLQIDs = append(result.SkippedDLQIDs, env.ID)
 			continue
 		}
 
 		reprocessMsg, err := buildReprocessMsg(env)
 		if err != nil {
 			_ = msg.TermWithReason("invalid DLQ envelope: " + err.Error())
+			result.FailedDLQIDs = append(result.FailedDLQIDs, env.ID)
 			continue
 		}
 
@@ -136,14 +201,120 @@ func (c *Client) ReprocessDLQ(ctx context.Context) (int, error) {
 		})
 		if err != nil {
 			_ = msg.Nak()
+			result.FailedDLQIDs = append(result.FailedDLQIDs, env.ID)
 			continue
 		}
 
 		_ = msg.Ack()
-		successCount++
+		result.Count++
+		result.ReprocessedDLQIDs = append(result.ReprocessedDLQIDs, env.ID)
 	}
 
-	return successCount, nil
+	return result, nil
+}
+
+func idSet(ids []string) map[string]bool {
+	if len(ids) == 0 {
+		return nil
+	}
+	result := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			result[id] = true
+		}
+	}
+	return result
+}
+
+func decodeDLQEnvelope(msg jetstream.Msg) (DLQEnvelope, error) {
+	var env DLQEnvelope
+	if err := json.Unmarshal(msg.Data(), &env); err != nil {
+		return DLQEnvelope{}, err
+	}
+	return env, nil
+}
+
+func dlqPreviewItem(env DLQEnvelope) ports.DLQPreviewItem {
+	risk := "none"
+	if strings.TrimSpace(env.MsgID) != "" {
+		risk = "possible"
+	}
+	return ports.DLQPreviewItem{
+		DLQID:           env.ID,
+		OriginalSubject: env.OriginalSubject,
+		Reason:          env.Reason,
+		ErrorClass:      env.ErrorClass,
+		DuplicateRisk:   risk,
+		ReplayTarget:    env.OriginalSubject,
+	}
+}
+
+func dlqEnvelopeMatches(env DLQEnvelope, selected map[string]bool, filter ports.DLQFilter) bool {
+	if len(selected) > 0 && !selected[env.ID] {
+		return false
+	}
+	if filter.OriginalTopic != "" && !subjectHasPrefix(env.OriginalSubject, filter.OriginalTopic) {
+		return false
+	}
+	if filter.OriginalPartition != "" && !dlqPartitionMatches(env, filter.OriginalPartition) {
+		return false
+	}
+	if filter.SourceID != "" && env.SourceID != filter.SourceID {
+		return false
+	}
+	if filter.Schema != "" && env.Schema != filter.Schema {
+		return false
+	}
+	if filter.Table != "" && env.Table != filter.Table {
+		return false
+	}
+	if filter.Op != "" && env.Op != filter.Op {
+		return false
+	}
+	if filter.ErrorClass != "" && env.ErrorClass != filter.ErrorClass {
+		return false
+	}
+	if filter.ReasonContains != "" && !containsFold(env.Reason, filter.ReasonContains) {
+		return false
+	}
+	if filter.HeaderKey != "" {
+		got, ok := lookupHeader(env.OriginalHeaders, filter.HeaderKey)
+		if !ok {
+			return false
+		}
+		if filter.HeaderValue != "" && got != filter.HeaderValue {
+			return false
+		}
+	}
+	if filter.JSONPath != "" {
+		value, ok := jsonPathValue(env.Payload, filter.JSONPath)
+		if !ok {
+			return false
+		}
+		if filter.JSONEquals != "" && !jsonValueEquals(value, filter.JSONEquals) {
+			return false
+		}
+	}
+	if filter.TextContains != "" &&
+		!containsFold(env.OriginalSubject, filter.TextContains) &&
+		!containsFold(env.Reason, filter.TextContains) &&
+		!bytes.Contains(bytes.ToLower(env.Payload), []byte(strings.ToLower(filter.TextContains))) {
+		return false
+	}
+	return true
+}
+
+func dlqPartitionMatches(env DLQEnvelope, partition string) bool {
+	if got, ok := lookupHeader(env.OriginalHeaders, constant.HeaderPartition); ok && got == partition {
+		return true
+	}
+	parts := strings.Split(env.OriginalSubject, ".")
+	return len(parts) > 0 && parts[len(parts)-1] == strings.Trim(partition, ".")
+}
+
+func containsFold(haystack string, needle string) bool {
+	return strings.Contains(strings.ToLower(haystack), strings.ToLower(strings.TrimSpace(needle)))
 }
 
 func buildDLQEnvelope(msg jetstream.Msg, opts ports.DLQMoveOptions) (DLQEnvelope, error) {
@@ -237,10 +408,10 @@ func buildReprocessMsg(env DLQEnvelope) (*nats.Msg, error) {
 
 	originalMsgID := headers.Get("Nats-Msg-Id")
 	if originalMsgID == "" {
-		originalMsgID = env.ID
+		originalMsgID = firstNonEmpty(env.MsgID, env.ID, env.OriginalSubject)
 	}
 	if originalMsgID != "" {
-		headers.Set("Nats-Msg-Id", fmt.Sprintf("%s.reprocess.%d", originalMsgID, time.Now().UnixNano()))
+		headers.Set("Nats-Msg-Id", deterministicReprocessID(originalMsgID, env.RetryCount+1))
 	}
 
 	return &nats.Msg{
@@ -248,6 +419,49 @@ func buildReprocessMsg(env DLQEnvelope) (*nats.Msg, error) {
 		Data:    append([]byte(nil), env.Payload...),
 		Header:  headers,
 	}, nil
+}
+
+func deterministicReprocessID(originalMsgID string, attempt uint64) string {
+	originalMsgID = strings.TrimSpace(originalMsgID)
+	if originalMsgID == "" {
+		originalMsgID = "unknown"
+	}
+	if attempt == 0 {
+		attempt = 1
+	}
+
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%d", originalMsgID, attempt)))
+	return fmt.Sprintf("%s.reprocess.%d.%x", compactMsgIDComponent(originalMsgID), attempt, sum[:8])
+}
+
+func compactMsgIDComponent(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+
+	var b strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_' || r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+		if b.Len() >= 80 {
+			break
+		}
+	}
+	if b.Len() == 0 {
+		return "unknown"
+	}
+	return b.String()
 }
 
 func headerToMap(headers nats.Header) map[string]string {

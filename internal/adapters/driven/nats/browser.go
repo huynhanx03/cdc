@@ -3,10 +3,12 @@ package nats
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/foden/cdc/internal/core/domain"
+	"github.com/foden/cdc/internal/core/ports"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -117,6 +119,88 @@ func (c *Client) ListMessages(ctx context.Context, status domain.MessageStatus, 
 	}
 
 	return result, total, nil
+}
+
+// ListMessagesWithFilter applies the richer Explorer filter model. JetStream
+// subject filtering is still pushed down to NATS; metadata and payload
+// predicates are applied in-process over a capped fetch window.
+func (c *Client) ListMessagesWithFilter(ctx context.Context, status domain.MessageStatus, limit int, page int, filter ports.NATSMessageFilter) ([]*MessageItem, uint64, error) {
+	stream, err := c.js.Stream(ctx, c.streamName)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to get stream: %w", err)
+	}
+
+	info, err := stream.Info(ctx)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to get stream info: %w", err)
+	}
+	if info.State.Msgs == 0 {
+		return []*MessageItem{}, 0, nil
+	}
+
+	if limit <= 0 {
+		limit = 25
+	}
+	if page <= 0 {
+		page = 1
+	}
+
+	startSeq := info.State.FirstSeq
+	ackFloor, _, err := c.GetConsumerInfo(ctx, "")
+	if status == domain.MessageStatusUnsent && err == nil {
+		if ackFloor >= info.State.LastSeq {
+			return []*MessageItem{}, 0, nil
+		}
+		startSeq = ackFloor + 1
+	}
+
+	consumer, err := c.js.CreateConsumer(ctx, c.streamName, jetstream.ConsumerConfig{
+		FilterSubject:     ExplorerMessageFilter(filter).NATSFilterSubject(),
+		DeliverPolicy:     jetstream.DeliverByStartSequencePolicy,
+		OptStartSeq:       startSeq,
+		AckPolicy:         jetstream.AckNonePolicy,
+		InactiveThreshold: 10 * time.Second,
+	})
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to create ephemeral consumer: %w", err)
+	}
+
+	fetchCount := limit * page * 4
+	if fetchCount < 100 {
+		fetchCount = 100
+	}
+	if fetchCount > 500 {
+		fetchCount = 500
+	}
+
+	iter, err := consumer.Fetch(fetchCount, jetstream.FetchMaxWait(time.Second))
+	if err != nil {
+		return nil, 0, err
+	}
+
+	matches := make([]*MessageItem, 0, fetchCount)
+	for msg := range iter.Messages() {
+		item := messageItemFromJetStreamMsg(msg)
+		if !ExplorerMessageFilter(filter).Matches(item) {
+			continue
+		}
+		matches = append(matches, item)
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		if filter.Sort == "newest" {
+			return matches[i].Sequence > matches[j].Sequence
+		}
+		return matches[i].Sequence < matches[j].Sequence
+	})
+	skipMatches := (page - 1) * limit
+	if skipMatches >= len(matches) {
+		return []*MessageItem{}, uint64(len(matches)), nil
+	}
+	end := skipMatches + limit
+	if end > len(matches) {
+		end = len(matches)
+	}
+	return matches[skipMatches:end], uint64(len(matches)), nil
 }
 
 func (c *Client) ListDLQMessages(ctx context.Context, limit int, page int) ([]*MessageItem, uint64, error) {
@@ -284,6 +368,25 @@ func (c *Client) listStreamMessages(ctx context.Context, streamName string, filt
 		}
 	}
 	return result, total, nil
+}
+
+func messageItemFromJetStreamMsg(msg jetstream.Msg) *MessageItem {
+	meta, _ := msg.Metadata()
+	headers := make(map[string]string)
+	msgHdr := msg.Headers()
+	for key := range msgHdr {
+		headers[key] = msgHdr.Get(key)
+	}
+	item := &MessageItem{
+		Subject: msg.Subject(),
+		Data:    msg.Data(),
+		Headers: headers,
+	}
+	if meta != nil {
+		item.Sequence = meta.Sequence.Stream
+		item.Timestamp = meta.Timestamp.UnixMilli()
+	}
+	return item
 }
 
 // paginate handles slicing of string arrays based on limit and page parameters

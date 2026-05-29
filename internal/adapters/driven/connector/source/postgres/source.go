@@ -35,6 +35,7 @@ const (
 	_standbyInterval = 10 * time.Second
 	_walLevelLogical = "logical"
 	_snapshotAction  = "NOEXPORT_SNAPSHOT"
+	_taskChannelSize = 8192
 )
 
 // Internal representation of a row change before JSON encoding
@@ -95,7 +96,7 @@ func New(cfg *ports.SourceConfig) (*PostgresSource, error) {
 		runtimeRegistry: coreruntime.DefaultRegistry(),
 		runtimeMetrics:  coreruntime.DefaultMetrics(),
 		// Larger buffer to absorb bursts while maintaining sequence
-		taskChan: make(chan *walTask, 8192),
+		taskChan: make(chan *walTask, _taskChannelSize),
 	}, nil
 }
 
@@ -198,7 +199,7 @@ func (p *PostgresSource) processTask(t *walTask) {
 	if p.runtimeMetrics != nil {
 		p.runtimeMetrics.RecordSourceProduced(p.cfg.InstanceID, namespace, table, 1, t.ts)
 	}
-	metrics.EventsProducedTotal.WithLabelValues(p.cfg.InstanceID, "success").Inc()
+	metrics.EventsProducedTotal.WithLabelValues(p.cfg.InstanceID, metrics.StatusSuccess).Inc()
 }
 
 // calculatePartition hashes the Primary Key of the row to determine the destination partition.
@@ -416,7 +417,7 @@ func (p *PostgresSource) dispatchToWorkers(msg pglogrepl.Message, lsn uint64) {
 		}
 		msgID := p.walMessageID(lsn, v.RelationID, changeIdx, rel, constant.OpUpdate)
 		changeIdx++
-		p.taskChan <- &walTask{op: constant.OpUpdate, rel: rel, old: v.OldTuple.Columns, new: v.NewTuple.Columns, lsn: lsn, msgID: msgID, ts: ts, partitionCount: int(interest.PartitionCount)}
+		p.taskChan <- &walTask{op: constant.OpUpdate, rel: rel, old: tupleColumns(v.OldTuple), new: tupleColumns(v.NewTuple), lsn: lsn, msgID: msgID, ts: ts, partitionCount: int(interest.PartitionCount)}
 	case *pglogrepl.DeleteMessage:
 		p.relMu.RLock()
 		rel, ok := p.relations[v.RelationID]
@@ -430,8 +431,15 @@ func (p *PostgresSource) dispatchToWorkers(msg pglogrepl.Message, lsn uint64) {
 		}
 		msgID := p.walMessageID(lsn, v.RelationID, changeIdx, rel, constant.OpDelete)
 		changeIdx++
-		p.taskChan <- &walTask{op: constant.OpDelete, rel: rel, old: v.OldTuple.Columns, lsn: lsn, msgID: msgID, ts: ts, partitionCount: int(interest.PartitionCount)}
+		p.taskChan <- &walTask{op: constant.OpDelete, rel: rel, old: tupleColumns(v.OldTuple), lsn: lsn, msgID: msgID, ts: ts, partitionCount: int(interest.PartitionCount)}
 	}
+}
+
+func tupleColumns(tuple *pglogrepl.TupleData) []*pglogrepl.TupleDataColumn {
+	if tuple == nil {
+		return nil
+	}
+	return tuple.Columns
 }
 
 func (p *PostgresSource) walMessageID(lsn uint64, relationID uint32, changeIdx int, rel *pglogrepl.RelationMessage, op constant.Op) string {
@@ -591,12 +599,7 @@ func (p *PostgresSource) sendStandbyUpdate(clientLSN pglogrepl.LSN) {
 	// 3. Apply: Same as Flush in most CDC scenarios.
 	flushed := pglogrepl.LSN(atomic.LoadUint64(&p.flushedLSN))
 
-	// If no events have been flushed/ACKed yet, we use the clientLSN
-	// to avoid telling Postgres we are at position 0.
-	flushPos := flushed
-	if flushPos == 0 {
-		flushPos = clientLSN
-	}
+	flushPos := standbyFlushPosition(flushed, clientLSN)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -611,6 +614,10 @@ func (p *PostgresSource) sendStandbyUpdate(clientLSN pglogrepl.LSN) {
 	if err != nil {
 		slog.Error("Failed to send standby status update", "err", err, "instance", p.cfg.InstanceID)
 	}
+}
+
+func standbyFlushPosition(flushed, _ pglogrepl.LSN) pglogrepl.LSN {
+	return flushed
 }
 
 // receiveMessage reads a single message from the replication stream with a deadline.

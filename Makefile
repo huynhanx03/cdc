@@ -5,8 +5,9 @@ COMPOSE_FILE := deploy/docker-compose.yaml
 PROTO_DIR := proto
 PROTO_IMAGE_NAME := cdc-proto-gen
 PROTO_DOCKERFILE := $(PROTO_DIR)/Dockerfile
+DOCKER_HOST_FOR_TESTS ?= $(shell docker context inspect $$(docker context show 2>/dev/null) --format '{{json .Endpoints.docker.Host}}' 2>/dev/null | tr -d '"')
 
-.PHONY: all help build run test tidy up down fix-perms clean gen-proto proto-lint proto-breaking .docker-check .proto-image fe-install fe-dev fe-build fe-lint
+.PHONY: all help build run test test-unit test-integration test-e2e test-all bench bench-pipeline tidy up down fix-perms clean gen-proto proto-lint proto-breaking .docker-check .proto-image fe-install fe-dev fe-build fe-lint
 
 all: tidy build
 
@@ -15,7 +16,13 @@ help:
 		"Targets:" \
 		"  build       Build $(APP_NAME) binary" \
 		"  run         Build and run using $(CONFIG_FILE)" \
-		"  test        Run Go tests" \
+		"  test        Run Go unit tests" \
+		"  test-unit   Run fast Go unit tests" \
+		"  test-integration Run Docker-backed integration tests" \
+		"  test-e2e    Run E2E workflow tests" \
+		"  test-all    Run unit, integration, and E2E tests" \
+		"  bench       Run all Go benchmarks" \
+		"  bench-pipeline Run CDC pipeline benchmarks" \
 		"  tidy        Run go mod tidy" \
 		"  up          Start docker compose stack" \
 		"  down        Stop docker compose stack" \
@@ -30,8 +37,24 @@ build:
 run: build
 	./$(BIN_DIR)/$(APP_NAME) -config $(CONFIG_FILE)
 
-test:
-	go test -v ./...
+test: test-unit
+
+test-unit:
+	go test ./...
+
+test-integration: .docker-check
+	DOCKER_HOST=$(DOCKER_HOST_FOR_TESTS) TESTCONTAINERS_RYUK_DISABLED=true go test -tags=integration ./tests/integration/...
+
+test-e2e: .docker-check
+	DOCKER_HOST=$(DOCKER_HOST_FOR_TESTS) TESTCONTAINERS_RYUK_DISABLED=true go test -tags=e2e ./tests/e2e/...
+
+test-all: test-unit test-integration test-e2e
+
+bench:
+	go test -bench=. -benchmem ./...
+
+bench-pipeline:
+	go test -bench=. -benchmem ./benchmarks/pipeline/...
 
 tidy:
 	go mod tidy

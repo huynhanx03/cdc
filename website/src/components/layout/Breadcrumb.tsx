@@ -32,7 +32,7 @@ export function Breadcrumb() {
   }
 
   return (
-    <nav className="flex items-center gap-1 text-sm" aria-label="Breadcrumb">
+    <nav className="flex items-center gap-1 text-sm" aria-label={t('nav.breadcrumb')}>
       <Link
         to="/"
         className="flex items-center text-muted-foreground transition-colors hover:text-foreground"

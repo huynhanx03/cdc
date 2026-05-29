@@ -14,13 +14,13 @@ services:
   # cdc-app:
   #   build:
   #     context: .
-  #     dockerfile: Dockerfile
+  #     dockerfile: deploy/docker/Dockerfile
   #   container_name: cdc-app
   #   ports:
   #     - "9090:9090"   # gRPC API
   #     - "9091:9091"   # REST API
   #   volumes:
-  #     - ./deploy/app/config.yaml:/app/config.yaml
+  #     - ../config/config.yaml:/app/config.yaml
   #   depends_on:
   #     - nats-1
   #   networks:

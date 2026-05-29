@@ -18,12 +18,7 @@ export function MessageDetailSheet({
   const { t } = useTranslation();
   const raw = message ? decodePayload(message.data) : '';
   const parsedSubject = message ? parseSubject(message.subject) : null;
-  let json: unknown = null;
-  try {
-    json = raw ? JSON.parse(raw) : null;
-  } catch {
-    json = null;
-  }
+  const json = parseJSON(raw);
 
   const copy = async (value: string) => {
     await navigator.clipboard.writeText(value);
@@ -95,4 +90,13 @@ function Info({ label, value }: { label: string; value: string }) {
       <div className="mt-1 truncate font-mono text-foreground">{value}</div>
     </div>
   );
+}
+
+function parseJSON(value: string): unknown | null {
+  if (!value) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
 }

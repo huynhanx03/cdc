@@ -2,6 +2,7 @@
   "nav": {
     "dashboard": "Bảng điều khiển",
     "explorer": "Khám phá",
+    "overview": "Tổng quan",
     "topics": "Chủ đề",
     "consumers": "Bộ đọc",
     "messages": "Tin nhắn",
@@ -9,7 +10,9 @@
     "manager": "Quản lý",
     "sources": "Nguồn dữ liệu",
     "sinks": "Đích đến",
-    "flows": "Luồng dữ liệu"
+    "flows": "Luồng dữ liệu",
+    "toggleSidebar": "Thu gọn/mở thanh bên",
+    "breadcrumb": "Điều hướng phân cấp"
   },
   "dashboard": {
     "title": "Bảng điều khiển",
@@ -140,6 +143,50 @@
     "originalSubject": "Original subject",
     "reason": "Lý do",
     "dlqClean": "DLQ đang sạch.",
+    "overviewTitle": "Khám phá",
+    "overviewDesc": "Điểm vào để xem sức khỏe stream CDC, độ lag và khôi phục message lỗi.",
+    "topicsNeedingAttention": "Topics cần chú ý",
+    "noTopicsNeedAttention": "Không có topic nào cần chú ý.",
+    "recentDlq": "DLQ gần đây",
+    "replayRisk": "Rủi ro {{risk}}",
+    "noFilterSubjects": "Chưa có filter subject được báo cáo.",
+    "recentMessages": "Messages gần đây",
+    "noRecentMessages": "Không có message gần đây.",
+    "subject": "Subject",
+    "operation": "Thao tác",
+    "latestSequence": "Sequence mới nhất",
+    "messageTimeline": "Timeline message",
+    "lagAndCheckpoints": "Lag & Checkpoints",
+    "delivered": "Delivered",
+    "noCheckpointContext": "Không có checkpoint context cho partition này.",
+    "keyOrId": "Key/ID",
+    "markers": "Đánh dấu",
+    "before": "Trước",
+    "after": "Sau",
+    "confirmDlqReprocess": "Xác nhận xử lý lại DLQ",
+    "dlqPreviewSummary": "Preview tìm thấy {{count}} messages và {{blocked}} item bị chặn.",
+    "reprocessSelected": "Xử lý lại mục đã chọn",
+    "previewSelected": "Preview {{count}}",
+    "previewDlqFailed": "Preview xử lý lại DLQ thất bại",
+    "filter": {
+      "allOps": "Tất cả thao tác",
+      "create": "Tạo",
+      "update": "Cập nhật",
+      "delete": "Xóa",
+      "sequenceMin": "Seq min",
+      "sequenceMax": "Seq max",
+      "payloadContains": "Payload chứa",
+      "sort": "Sắp xếp",
+      "newest": "Mới nhất",
+      "oldest": "Cũ nhất",
+      "clear": "Xóa lọc",
+      "headerKey": "Header key",
+      "headerValue": "Header value",
+      "jsonPath": "JSON path",
+      "jsonEquals": "JSON equals",
+      "fromMs": "Từ ms",
+      "toMs": "Đến ms"
+    },
     "status": {
       "sent": "ĐÃ GỬI",
       "dlq": "DLQ",
@@ -154,6 +201,7 @@
       "usedByFlows": "{{count}} flow",
       "unused": "Chưa dùng",
       "events": "Sự kiện",
+      "throughput": "Thông lượng",
       "written": "Đã ghi",
       "errors": "Lỗi",
       "filterOn": "Có bộ lọc",
@@ -169,6 +217,8 @@
       "testSuccess": "Kết nối thành công!",
       "testFailed": "Kết nối thất bại",
       "addDesc": "Định nghĩa các thuộc tính để truyền các sự kiện nguồn vào luồng NATS của bạn.",
+      "createDesc": "Đăng ký một kết nối cơ sở dữ liệu làm nguồn CDC.",
+      "editDesc": "Cập nhật thông tin kết nối cơ sở dữ liệu cho nguồn này.",
       "fields": {
         "instanceId": "Mã thực thể (Instance ID)",
         "displayName": "Tên hiển thị (Tùy chọn)",
@@ -193,6 +243,10 @@
       "placeholders": {
         "instanceId": "ví dụ: pg_prod",
         "displayName": "ví dụ: Production Postgres",
+        "host": "localhost",
+        "database": "my_database",
+        "password": "password",
+        "editPassword": "••••••••",
         "topic": "ví dụ: cdc.postgres",
         "tablesList": "ví dụ: public.users, public.orders",
         "headers": "{ \"Authorization\": \"Bearer token_here\" }"
@@ -248,6 +302,8 @@
       "testSuccess": "Kết nối thành công!",
       "testFailed": "Kết nối thất bại",
       "addDesc": "Định nghĩa các thuộc tính để ghi dữ liệu vào cơ sở dữ liệu, Elasticsearch, webhook, hoặc các mục tiêu console.",
+      "createDesc": "Đăng ký một kết nối đích để ghi dữ liệu CDC.",
+      "editDesc": "Cập nhật thông tin kết nối cơ sở dữ liệu cho đích này.",
       "fields": {
         "instanceId": "Mã thực thể (Instance ID)",
         "displayName": "Tên hiển thị (Tùy chọn)",
@@ -272,6 +328,10 @@
       "placeholders": {
         "instanceId": "ví dụ: es_sink_dev",
         "displayName": "ví dụ: Analytics Elasticsearch",
+        "host": "localhost",
+        "database": "my_database",
+        "password": "password",
+        "editPassword": "••••••••",
         "topic": "ví dụ: cdc.postgres",
         "esUrls": "ví dụ: http://localhost:9200, http://elasticsearch:9200",
         "index": "cdc-events",
@@ -409,7 +469,14 @@
         "lag": "Độ trễ sao chép",
         "lagDesc": "Độ trễ offset: {{lag}}ms",
         "eventsSynced": "Sự kiện đã đồng bộ",
-        "eventsSyncedDesc": "Tích lũy hồ sơ trọn đời"
+        "eventsSyncedDesc": "Tích lũy hồ sơ trọn đời",
+        "failures": "Thất bại",
+        "failuresDesc": "Lỗi ghi sink hoặc lỗi mapping",
+        "workers": "Workers",
+        "workersDesc": "Sử dụng pool {{value}}",
+        "filtered": "Đã lọc",
+        "dlq": "DLQ",
+        "lastError": "Lỗi gần nhất"
       },
       "detail": {
         "columnSchema": "Sơ đồ ánh xạ cột",
@@ -424,7 +491,8 @@
         "batchSize": "Kích thước Batch",
         "flushInterval": "Khoảng thời gian Flush",
         "partitionCount": "Số phân vùng",
-        "filterExpression": "Biểu thức lọc (CEL)"
+        "filterExpression": "Biểu thức lọc (CEL)",
+        "noMappings": "Không có mapping cột nào được cấu hình."
       },
       "table": {
         "active": "Kích hoạt",
@@ -462,6 +530,7 @@
     "seconds": "s",
     "save": "Lưu",
     "cancel": "Hủy",
+    "close": "Đóng",
     "create": "Tạo mới",
     "delete": "Xóa",
     "actions": "Thao tác",
@@ -478,11 +547,13 @@
     "refresh": "Làm mới cấu hình"
   },
   "theme": {
+    "label": "Giao diện",
     "light": "Sáng",
     "dark": "Tối",
     "system": "Hệ thống"
   },
   "language": {
+    "label": "Ngôn ngữ",
     "en": "English",
     "vi": "Tiếng Việt",
     "zh": "中文"

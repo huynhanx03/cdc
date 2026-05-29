@@ -28,23 +28,14 @@ import {
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { StatusBadge, type Status } from '@/components/shared/StatusBadge';
+import { labelKeyForFlowStatus, statusForFlow } from '@/config/status';
 import { FlowWizard } from './FlowWizard';
 import { ROUTES } from '@/config/routes';
-import type { FlowConfig, FlowStatus } from '@/types/api';
+import type { FlowConfig } from '@/types/api';
 import { DeleteConfirmDialog } from '../components/DeleteConfirmDialog';
 
-function statusToBadge(status: FlowStatus): Status {
-  if (status === 'FLOW_STATUS_RUNNING') return 'healthy';
-  if (status === 'FLOW_STATUS_PAUSED') return 'paused';
-  if (status === 'FLOW_STATUS_ERROR') return 'unhealthy';
-  return 'idle';
-}
-
-function statusLabel(status: FlowStatus) {
-  if (status === 'FLOW_STATUS_RUNNING') return 'Running';
-  if (status === 'FLOW_STATUS_PAUSED') return 'Paused';
-  if (status === 'FLOW_STATUS_ERROR') return 'Error';
-  return 'Idle';
+function statusToBadge(status: FlowConfig['status']): Status {
+  return statusForFlow(status);
 }
 
 function flowOption(flow: FlowConfig, key: 'batch_size' | 'partition_count') {
@@ -239,9 +230,7 @@ export default function FlowsPage() {
                       </div>
                       <StatusBadge
                         status={statusToBadge(flow.status)}
-                        label={t(`common.status.${statusToBadge(flow.status)}`, {
-                          defaultValue: statusLabel(flow.status),
-                        })}
+                        label={t(labelKeyForFlowStatus(flow.status))}
                         className="shrink-0"
                       />
                     </div>
@@ -307,7 +296,7 @@ export default function FlowsPage() {
                       className="w-fit border-sky-500/25 bg-sky-500/10 text-[10px] text-sky-600 dark:text-sky-400"
                     >
                       <Filter className="mr-1 h-3 w-3" />
-                      {t('manager.cards.filterOn', { defaultValue: 'Filter on' })}
+                      {t('manager.cards.filterOn')}
                     </Badge>
                   )}
                 </div>

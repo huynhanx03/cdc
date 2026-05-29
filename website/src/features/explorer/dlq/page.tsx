@@ -1,9 +1,12 @@
 import { useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Inbox, RefreshCw, RotateCcw, X } from 'lucide-react';
+import { Inbox, RefreshCw, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { useTranslation } from 'react-i18next';
 
+import { MetricTile } from '@/components/shared/MetricTile';
+import { PageHeader } from '@/components/shared/PageHeader';
+import { EmptyTableRow, LoadingTableRows } from '@/components/shared/TableState';
 import { Button } from '@/components/ui/button';
 import {
   Table,
@@ -13,17 +16,23 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { useDLQMessages, useReprocessDLQ } from '@/lib/query/explorer';
+import { useDLQMessages, useDLQPreview, useReprocessDLQ } from '@/lib/query/explorer';
 import type { DLQMessage } from '@/types/api';
+import { DLQDryRunButton } from '../components/DLQDryRunDialog';
 import { MessageDetailSheet } from '../components/MessageDetailSheet';
-import { formatBytes, formatTime, messageSize, StatusBadge } from '../shared';
+import { ReprocessConfirmDialog } from '../components/ReprocessConfirmDialog';
+import { StatusBadge } from '../components/StatusBadge';
+import { formatBytes, formatTime, messageSize } from '../shared';
 
 export default function ExplorerDLQPage() {
   const { t } = useTranslation();
   const [searchParams, setSearchParams] = useSearchParams();
   const topicFilter = searchParams.get('topic') || '';
   const [selectedMessage, setSelectedMessage] = useState<DLQMessage | null>(null);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const { data, isLoading, isFetching, refetch } = useDLQMessages(1, 100);
+  const previewMutation = useDLQPreview();
   const reprocessMutation = useReprocessDLQ();
   const messages = useMemo(() => {
     const rows = data?.data ?? [];
@@ -35,58 +44,80 @@ export default function ExplorerDLQPage() {
     });
   }, [data, topicFilter]);
 
-  const reprocessAll = async () => {
+  const selectedMessages = useMemo(
+    () => messages.filter((message) => selectedIds.includes(dlqID(message))),
+    [messages, selectedIds],
+  );
+
+  const previewSelected = async () => {
     try {
-      const result = await reprocessMutation.mutateAsync();
+      await previewMutation.mutateAsync({
+        selected_dlq_ids: selectedIds,
+        filter: topicFilter ? { original_topic: topicFilter } : undefined,
+        max_count: selectedIds.length || 100,
+      });
+      setConfirmOpen(true);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('explorer.previewDlqFailed'));
+    }
+  };
+
+  const confirmReprocess = async () => {
+    const preview = previewMutation.data;
+    if (!preview?.confirm_token) return;
+    try {
+      const result = await reprocessMutation.mutateAsync({
+        selected_dlq_ids: selectedIds,
+        filter: topicFilter ? { original_topic: topicFilter } : undefined,
+        confirm_token: preview.confirm_token,
+        max_count: selectedIds.length || 100,
+      });
       toast.success(t('explorer.reprocessedCount', { count: result.count || 0 }));
+      setSelectedIds([]);
+      setConfirmOpen(false);
       refetch();
-    } catch (error: any) {
-      toast.error(error.message || t('explorer.reprocessDlqFailed'));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t('explorer.reprocessDlqFailed'));
     }
   };
 
   return (
     <div className="flex h-full flex-col gap-5">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-foreground">
-            {t('explorer.dlq')}
-          </h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {t('explorer.dlqDesc')}
-          </p>
-          {topicFilter ? (
-            <button
-              type="button"
-              onClick={() => setSearchParams({})}
-              className="mt-3 inline-flex max-w-full cursor-pointer items-center gap-2 rounded-full border border-rose-500/25 bg-rose-500/10 px-3 py-1 text-xs text-rose-700 transition-colors hover:bg-rose-500/15 dark:text-rose-300"
-            >
-              <span className="truncate font-mono">{topicFilter}</span>
-              <X className="h-3.5 w-3.5" />
-            </button>
-          ) : null}
-        </div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={() => refetch()}>
-            <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
-          </Button>
-          <Button size="sm" onClick={reprocessAll} disabled={reprocessMutation.isPending}>
-            <RotateCcw className={`h-4 w-4 ${reprocessMutation.isPending ? 'animate-spin' : ''}`} />
-            {t('explorer.reprocessAll')}
-          </Button>
-        </div>
-      </div>
+      <PageHeader
+        title={t('explorer.dlq')}
+        description={t('explorer.dlqDesc')}
+        eyebrow={topicFilter ? (
+          <button
+            type="button"
+            onClick={() => setSearchParams({})}
+            className="inline-flex max-w-full cursor-pointer items-center gap-2 rounded-full border border-rose-500/25 bg-rose-500/10 px-3 py-1 text-xs normal-case text-rose-700 transition-colors hover:bg-rose-500/15 dark:text-rose-300"
+          >
+            <span className="truncate font-mono">{topicFilter}</span>
+            <X className="h-3.5 w-3.5" />
+          </button>
+        ) : null}
+        actions={(
+          <>
+            <Button variant="outline" size="sm" onClick={() => refetch()}>
+              <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
+              {t('explorer.refresh')}
+            </Button>
+            <DLQDryRunButton selected={selectedMessages} loading={previewMutation.isPending} onPreview={previewSelected} />
+          </>
+        )}
+      />
 
       <div className="grid gap-3 md:grid-cols-3">
-        <Metric label={t('explorer.failedMessages')} value={messages.length.toLocaleString()} />
-        <Metric label={t('explorer.currentPage')} value={String(data?.pagination?.page ?? 1)} />
-        <Metric label={t('explorer.pageSize')} value={String(data?.pagination?.limit ?? 100)} />
+        <MetricTile label={t('explorer.failedMessages')} value={messages.length.toLocaleString()} />
+        <MetricTile label={t('explorer.currentPage')} value={String(data?.pagination?.page ?? 1)} />
+        <MetricTile label={t('explorer.pageSize')} value={String(data?.pagination?.limit ?? 100)} />
       </div>
 
       <div className="overflow-hidden rounded-lg border border-border bg-card">
         <Table>
           <TableHeader>
             <TableRow>
+              <TableHead className="w-10" />
               <TableHead>{t('explorer.failedAt')}</TableHead>
               <TableHead>{t('explorer.originalSubject')}</TableHead>
               <TableHead>{t('explorer.reason')}</TableHead>
@@ -97,20 +128,12 @@ export default function ExplorerDLQPage() {
           </TableHeader>
           <TableBody>
             {isLoading ? (
-              Array.from({ length: 6 }).map((_, index) => (
-                <TableRow key={index}>
-                  <TableCell colSpan={6}>
-                    <div className="h-6 animate-pulse rounded bg-muted" />
-                  </TableCell>
-                </TableRow>
-              ))
+              <LoadingTableRows colSpan={7} rows={6} />
             ) : messages.length === 0 ? (
-              <TableRow>
-                <TableCell colSpan={6} className="h-40 text-center text-sm text-muted-foreground">
-                  <Inbox className="mx-auto mb-3 h-8 w-8 opacity-50" />
-                  {t('explorer.dlqClean')}
-                </TableCell>
-              </TableRow>
+              <EmptyTableRow colSpan={7}>
+                <Inbox className="mx-auto mb-3 h-8 w-8 opacity-50" />
+                {t('explorer.dlqClean')}
+              </EmptyTableRow>
             ) : (
               messages.map((message) => (
                 <TableRow
@@ -118,6 +141,19 @@ export default function ExplorerDLQPage() {
                   className="cursor-pointer"
                   onClick={() => setSelectedMessage(message)}
                 >
+                  <TableCell onClick={(event) => event.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4"
+                      checked={selectedIds.includes(dlqID(message))}
+                      onChange={(event) => {
+                        const id = dlqID(message);
+                        setSelectedIds((current) =>
+                          event.target.checked ? [...new Set([...current, id])] : current.filter((item) => item !== id),
+                        );
+                      }}
+                    />
+                  </TableCell>
                   <TableCell className="whitespace-nowrap text-xs">{formatTime(message.timestamp)}</TableCell>
                   <TableCell className="max-w-[420px] truncate font-mono text-xs">
                     {message.original_subject || message.headers?.['X-DLQ-Original-Subject'] || '-'}
@@ -136,15 +172,17 @@ export default function ExplorerDLQPage() {
       </div>
 
       <MessageDetailSheet message={selectedMessage} onOpenChange={(open) => !open && setSelectedMessage(null)} />
+      <ReprocessConfirmDialog
+        open={confirmOpen}
+        preview={previewMutation.data ?? null}
+        loading={reprocessMutation.isPending}
+        onOpenChange={setConfirmOpen}
+        onConfirm={confirmReprocess}
+      />
     </div>
   );
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-lg border border-border bg-card p-4">
-      <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{label}</div>
-      <div className="mt-2 text-2xl font-semibold text-foreground">{value}</div>
-    </div>
-  );
+function dlqID(message: DLQMessage) {
+  return message.dlq_id || message.headers?.['Nats-Msg-Id'] || `${message.subject}-${message.sequence}`;
 }

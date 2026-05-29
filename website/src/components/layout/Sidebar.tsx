@@ -1,51 +1,16 @@
 import { NavLink, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import {
-  LayoutDashboard,
-  Search,
-  Settings,
-  Database,
-  HardDrive,
-  GitBranch,
-  MessageSquareText,
-  RadioTower,
-  Inbox,
-  Layers,
-  ChevronLeft,
-  ChevronRight,
-  ChevronDown,
-  Zap,
-} from 'lucide-react';
+import { ChevronDown, ChevronLeft, ChevronRight, Zap } from 'lucide-react';
 import { useState } from 'react';
 import { useSidebarStore } from '@/stores/sidebar';
 import { cn } from '@/lib/utils';
-import { NAV_ITEMS, ROUTES } from '@/config/routes';
+import { NAV_ITEMS } from '@/config/navigation';
+import { ROUTES } from '@/config/routes';
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
-
-/** Maps icon string names from route config to Lucide components. */
-const ICON_MAP = {
-  LayoutDashboard,
-  Search,
-  Settings,
-  Database,
-  HardDrive,
-  GitBranch,
-} as const;
-
-/** Sub-navigation icon map. */
-const SUB_ICON_MAP: Record<string, React.ElementType> = {
-  topics: Layers,
-  consumers: RadioTower,
-  messages: MessageSquareText,
-  dlq: Inbox,
-  sources: Database,
-  sinks: HardDrive,
-  flows: GitBranch,
-};
 
 /** Sidebar navigation — collapsible, dark-themed, with active indicators. */
 export function Sidebar() {
@@ -84,10 +49,10 @@ export function Sidebar() {
       {/* Navigation */}
       <nav className="flex-1 space-y-1 overflow-y-auto px-2 py-3">
         {NAV_ITEMS.map((item) => {
-          const Icon = ICON_MAP[item.icon];
+          const Icon = item.icon;
 
           // Items with children
-          if ('children' in item && item.children) {
+          if (item.children) {
             const isActive = location.pathname.startsWith(`/${item.key}`);
             const isOpen = openGroups[item.key] ?? false;
             return (
@@ -126,7 +91,7 @@ export function Sidebar() {
                 {isOpen && !collapsed && (
                   <div className="ml-4 mt-1 space-y-0.5 border-l border-border pl-3">
                     {item.children.map((child) => {
-                      const SubIcon = SUB_ICON_MAP[child.key] || Settings;
+                      const SubIcon = child.icon;
                       return (
                         <NavLink
                           key={child.key}
@@ -189,7 +154,7 @@ export function Sidebar() {
         <button
           onClick={toggle}
           className="flex w-full items-center justify-center rounded-lg p-2 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground cursor-pointer"
-          aria-label="Toggle sidebar"
+          aria-label={t('nav.toggleSidebar')}
         >
           {collapsed ? (
             <ChevronRight className="h-5 w-5" />

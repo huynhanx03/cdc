@@ -11,7 +11,11 @@ import (
 	"time"
 )
 
-const defaultQueryTimeout = 1500 * time.Millisecond
+const (
+	DefaultQueryWindow  = "5m"
+	defaultQueryTimeout = 1500 * time.Millisecond
+	prometheusStatusOK  = "success"
+)
 
 type PrometheusClient struct {
 	baseURL    string
@@ -32,7 +36,7 @@ func (c *PrometheusClient) FlowProcessingLatencyP99(ctx context.Context, window 
 		return 0, nil
 	}
 	if window == "" {
-		window = "5m"
+		window = DefaultQueryWindow
 	}
 	query := fmt.Sprintf(
 		`histogram_quantile(0.99, sum by (le) (rate(cdc_flow_processing_duration_seconds_bucket[%s])))`,
@@ -71,7 +75,7 @@ func (c *PrometheusClient) queryScalar(ctx context.Context, query string) (float
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return 0, err
 	}
-	if result.Status != "success" {
+	if result.Status != prometheusStatusOK {
 		return 0, fmt.Errorf("prometheus query status: %s", result.Status)
 	}
 	if result.Data.ResultType != "vector" || len(result.Data.Result) == 0 {

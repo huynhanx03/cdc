@@ -22,6 +22,20 @@ func TestMetricsRecordSinkWriteSetsFlowAndSinkSnapshots(t *testing.T) {
 	}
 }
 
+func TestMetricsRecordSinkWriteAveragesSinkLatency(t *testing.T) {
+	m := NewMetrics()
+	m.RecordSinkWrite("flow-1", "source-1", "sink-1", 3, 20, 1000)
+	m.RecordSinkWrite("flow-1", "source-1", "sink-1", 2, 40, 1000)
+
+	sink, ok := m.SinkSnapshot("sink-1")
+	if !ok {
+		t.Fatal("expected sink snapshot")
+	}
+	if sink.AvgLatencyMs != 30 {
+		t.Fatalf("AvgLatencyMs = %d, want 30", sink.AvgLatencyMs)
+	}
+}
+
 func TestMetricsRecordFailureAndDLQ(t *testing.T) {
 	m := NewMetrics()
 	m.RecordFlowFailure("flow-1", "source-1", "sink-1", "sink_error", "duplicate key", 2)

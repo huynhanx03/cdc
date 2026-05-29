@@ -1,41 +1,9 @@
 import { useTranslation } from 'react-i18next';
 import { Badge } from '@/components/ui/badge';
+import { STATUS_META, type AppStatus } from '@/config/status';
 import { cn } from '@/lib/utils';
 
-export type Status = 'running' | 'paused' | 'error' | 'idle' | 'healthy' | 'unhealthy';
-
-const STATUS_CONFIG: Record<Status, { label: string; className: string; dotClassName: string }> = {
-  running: {
-    label: 'Running',
-    className: 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20',
-    dotClassName: 'bg-emerald-500',
-  },
-  healthy: {
-    label: 'Healthy',
-    className: 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20',
-    dotClassName: 'bg-emerald-500',
-  },
-  paused: {
-    label: 'Paused',
-    className: 'bg-amber-500/10 text-amber-500 border-amber-500/20',
-    dotClassName: 'bg-amber-500',
-  },
-  error: {
-    label: 'Error',
-    className: 'bg-red-500/10 text-red-500 border-red-500/20',
-    dotClassName: 'bg-red-500',
-  },
-  unhealthy: {
-    label: 'Unhealthy',
-    className: 'bg-red-500/10 text-red-500 border-red-500/20',
-    dotClassName: 'bg-red-500',
-  },
-  idle: {
-    label: 'Idle',
-    className: 'bg-muted text-muted-foreground border-border',
-    dotClassName: 'bg-muted-foreground',
-  },
-};
+export type Status = AppStatus;
 
 interface StatusBadgeProps {
   status: Status;
@@ -47,7 +15,7 @@ interface StatusBadgeProps {
 /** Status badge — colored indicator for component state. */
 export function StatusBadge({ status, label, showDot = true, className }: StatusBadgeProps) {
   const { t } = useTranslation();
-  const config = STATUS_CONFIG[status] ?? STATUS_CONFIG.idle;
+  const config = STATUS_META[status] ?? STATUS_META.idle;
 
   return (
     <Badge
@@ -57,7 +25,7 @@ export function StatusBadge({ status, label, showDot = true, className }: Status
       {showDot && (
         <span className={cn('h-1.5 w-1.5 rounded-full', config.dotClassName)} />
       )}
-      {label || t('common.status.' + status, { defaultValue: config.label })}
+      {label || t(config.labelKey)}
     </Badge>
   );
 }

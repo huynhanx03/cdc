@@ -13,6 +13,29 @@ enum MessageStatus {
   MESSAGE_STATUS_UNSENT = 2;
 }
 
+enum ExplorerHealthStatus {
+  EXPLORER_HEALTH_STATUS_UNSPECIFIED = 0;
+  EXPLORER_HEALTH_STATUS_HEALTHY = 1;
+  EXPLORER_HEALTH_STATUS_IDLE = 2;
+  EXPLORER_HEALTH_STATUS_LAGGING = 3;
+  EXPLORER_HEALTH_STATUS_STALE = 4;
+  EXPLORER_HEALTH_STATUS_DLQ = 5;
+}
+
+enum ExplorerSort {
+  EXPLORER_SORT_UNSPECIFIED = 0;
+  EXPLORER_SORT_NEWEST_FIRST = 1;
+  EXPLORER_SORT_OLDEST_FIRST = 2;
+}
+
+message ExplorerScanMetadata {
+  bool partial = 1;
+  bool scan_limit_hit = 2;
+  uint64 scanned_count = 3;
+  uint64 matched_count = 4;
+  uint64 max_scan = 5;
+}
+
 // Request to list messages with optional filters.
 message ListMessagesRequest {
   MessageStatus status = 1;
@@ -20,6 +43,21 @@ message ListMessagesRequest {
   optional string topic = 3;
   optional string partition = 4;
   OffsetPaginationRequest pagination = 5;
+  optional string schema = 6;
+  optional string table = 7;
+  optional string op = 8;
+  optional uint64 sequence_min = 9;
+  optional uint64 sequence_max = 10;
+  optional int64 timestamp_from = 11;
+  optional int64 timestamp_to = 12;
+  optional string header_key = 13;
+  optional string header_value = 14;
+  optional string json_path = 15;
+  optional string json_equals = 16;
+  optional string text_contains = 17;
+  bool reprocessed_only = 18;
+  bool dlq_related_only = 19;
+  ExplorerSort sort = 20;
 }
 
 // Response containing a page of messages.
@@ -27,6 +65,7 @@ message ListMessagesResponse {
   repeated MessageItem data = 1;
   uint64 total_count = 2;
   OffsetPaginationResponse pagination = 3;
+  ExplorerScanMetadata scan = 4;
 }
 
 // A single message item.
@@ -36,6 +75,115 @@ message MessageItem {
   string subject = 3;
   bytes data = 4;
   map<string, string> headers = 5;
+  string op = 6;
+  string source_id = 7;
+  string schema = 8;
+  string table = 9;
+  string partition = 10;
+  string key = 11;
+  uint64 payload_size = 12;
+  uint32 header_count = 13;
+  string nats_msg_id = 14;
+  string reprocessed_from = 15;
+  repeated string markers = 16;
+}
+
+message GetExplorerOverviewRequest {}
+
+message GetExplorerOverviewResponse {
+  uint64 topic_count = 1;
+  uint64 partition_count = 2;
+  uint64 consumer_count = 3;
+  uint64 pending_count = 4;
+  uint64 ack_pending_count = 5;
+  uint64 dlq_depth = 6;
+  repeated TopicSummary topics_needing_attention = 7;
+  repeated DLQMessageSummary recent_dlq = 8;
+}
+
+message GetTopicDetailRequest {
+  string topic = 1;
+}
+
+message GetTopicDetailResponse {
+  TopicSummary summary = 1;
+  repeated PartitionSummary partitions = 2;
+  ExplorerScanMetadata scan = 3;
+}
+
+message GetPartitionDetailRequest {
+  string topic = 1;
+  string partition = 2;
+}
+
+message GetPartitionDetailResponse {
+  PartitionSummary summary = 1;
+  repeated MessageItem recent_messages = 2;
+  repeated CheckpointContext checkpoints = 3;
+  ExplorerScanMetadata scan = 4;
+}
+
+message ListPartitionMessagesRequest {
+  MessageStatus status = 1;
+  optional string source_id = 2;
+  string topic = 3;
+  string partition = 4;
+  OffsetPaginationRequest pagination = 5;
+  optional string schema = 6;
+  optional string table = 7;
+  optional string op = 8;
+  optional uint64 sequence_min = 9;
+  optional uint64 sequence_max = 10;
+  optional int64 timestamp_from = 11;
+  optional int64 timestamp_to = 12;
+  optional string header_key = 13;
+  optional string header_value = 14;
+  optional string json_path = 15;
+  optional string json_equals = 16;
+  optional string text_contains = 17;
+  bool reprocessed_only = 18;
+  bool dlq_related_only = 19;
+  ExplorerSort sort = 20;
+}
+
+message ListPartitionMessagesResponse {
+  repeated MessageItem data = 1;
+  uint64 total_count = 2;
+  OffsetPaginationResponse pagination = 3;
+  ExplorerScanMetadata scan = 4;
+}
+
+message GetMessageDetailRequest {
+  string topic = 1;
+  string partition = 2;
+  uint64 sequence = 3;
+}
+
+message GetMessageDetailResponse {
+  MessageItem item = 1;
+  bytes before = 2;
+  bytes after = 3;
+  repeated string changed_fields = 4;
+  CheckpointContext checkpoint = 5;
+}
+
+message CheckpointContext {
+  string consumer_name = 1;
+  uint64 delivered_stream_seq = 2;
+  uint64 ack_floor_stream_seq = 3;
+  uint64 num_pending = 4;
+  uint64 num_ack_pending = 5;
+  uint64 lag_messages = 6;
+  string last_delivered_at = 7;
+  string last_ack_at = 8;
+}
+
+message DLQMessageSummary {
+  string dlq_id = 1;
+  string original_subject = 2;
+  string reason = 3;
+  string error_class = 4;
+  string timestamp = 5;
 }
 
 // Request to get consumer information.
@@ -56,6 +204,22 @@ message ConsumerSummary {
   uint64 num_ack_pending = 4;
   uint64 delivered_stream_seq = 5;
   uint64 ack_floor_stream_seq = 6;
+  uint64 lag_messages = 7;
+  string replay_risk = 8;
+  string last_delivered_at = 9;
+  string last_ack_at = 10;
+}
+
+message GetConsumerDetailRequest {
+  string consumer_name = 1;
+}
+
+message GetConsumerDetailResponse {
+  ConsumerSummary summary = 1;
+  repeated TopicSummary topics = 2;
+  repeated PartitionSummary partitions = 3;
+  repeated MessageItem recent_messages = 4;
+  ExplorerScanMetadata scan = 5;
 }
 
 message ListConsumersRequest {
@@ -83,6 +247,15 @@ message TopicSummary {
   string name = 1;
   uint64 message_count = 2;
   int32 partition_count = 3;
+  uint64 consumer_count = 4;
+  uint64 dlq_count = 5;
+  uint64 pending_count = 6;
+  uint64 ack_pending_count = 7;
+  uint64 first_sequence = 8;
+  uint64 latest_sequence = 9;
+  string latest_event_at = 10;
+  ExplorerHealthStatus health = 11;
+  bool partial = 12;
 }
 
 // Request to list partitions for a topic.
@@ -102,4 +275,11 @@ message PartitionSummary {
   string id = 1;
   uint64 message_count = 2;
   string topic = 3;
+  uint64 pending_count = 4;
+  uint64 ack_pending_count = 5;
+  uint64 first_sequence = 6;
+  uint64 latest_sequence = 7;
+  string latest_event_at = 8;
+  ExplorerHealthStatus health = 9;
+  bool partial = 10;
 }

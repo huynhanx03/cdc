@@ -11,17 +11,14 @@ import { toast } from 'sonner';
 import { useFlows, useRemoveSink, useSinks, useStats } from '@/lib/query/manager';
 import { Button } from '@/components/ui/button';
 import { SinkForm } from './SinkForm';
+import { connectorLabel } from '@/config/connectors';
 import { formatNumber } from '@/lib/format';
 import type { SinkConfig } from '@/types/api';
 import { ConnectorCard } from '../components/ConnectorCard';
 import { DeleteConfirmDialog } from '../components/DeleteConfirmDialog';
 
 function sinkTypeLabel(type: SinkConfig['type']) {
-  if (type === 'postgres') return 'PostgreSQL';
-  if (type === 'mysql') return 'MySQL';
-  if (type === 'elasticsearch') return 'Elasticsearch';
-  if (type === 'clickhouse') return 'ClickHouse';
-  return String(type).toUpperCase();
+  return connectorLabel(type);
 }
 
 function endpointLabel(sink: SinkConfig) {
@@ -154,20 +151,17 @@ export default function SinksPage() {
                 instanceId={sink.instance_id}
                 metrics={[
                   {
-                    label: t('manager.cards.usage', { defaultValue: 'Usage' }),
+                    label: t('manager.cards.usage'),
                     value: activeFlows > 0
-                      ? t('manager.cards.usedByFlows', {
-                          defaultValue: '{{count}} flows',
-                          count: activeFlows,
-                        })
-                      : t('manager.cards.unused', { defaultValue: 'Unused' }),
+                      ? t('manager.cards.usedByFlows', { count: activeFlows })
+                      : t('manager.cards.unused'),
                   },
                   {
-                    label: t('manager.cards.throughput', { defaultValue: 'Rate' }),
+                    label: t('manager.cards.throughput'),
                     value: `${formatNumber(throughput)}/s`,
                   },
                   {
-                    label: t('manager.cards.errors', { defaultValue: 'Errors' }),
+                    label: t('manager.cards.errors'),
                     value: errors > 0 ? `${formatNumber(errors)} · ${errorRate.toFixed(2)}%` : '0',
                     tone: errors > 0 ? 'danger' : 'default',
                   },

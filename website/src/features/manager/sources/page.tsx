@@ -11,13 +11,14 @@ import { toast } from 'sonner';
 import { useFlows, useRemoveSource, useSources, useStats } from '@/lib/query/manager';
 import { Button } from '@/components/ui/button';
 import { SourceForm } from './SourceForm';
+import { connectorLabel } from '@/config/connectors';
 import { formatNumber } from '@/lib/format';
 import type { SourceConfig } from '@/types/api';
 import { ConnectorCard } from '../components/ConnectorCard';
 import { DeleteConfirmDialog } from '../components/DeleteConfirmDialog';
 
 function sourceTypeLabel(type: SourceConfig['type']) {
-  return type === 'postgres' ? 'PostgreSQL' : type.toUpperCase();
+  return connectorLabel(type);
 }
 
 function endpointLabel(source: SourceConfig) {
@@ -143,20 +144,17 @@ export default function SourcesPage() {
                 instanceId={source.instance_id}
                 metrics={[
                   {
-                    label: t('manager.cards.usage', { defaultValue: 'Usage' }),
+                    label: t('manager.cards.usage'),
                     value: activeFlows > 0
-                      ? t('manager.cards.usedByFlows', {
-                          defaultValue: '{{count}} flows',
-                          count: activeFlows,
-                        })
-                      : t('manager.cards.unused', { defaultValue: 'Unused' }),
+                      ? t('manager.cards.usedByFlows', { count: activeFlows })
+                      : t('manager.cards.unused'),
                   },
                   {
-                    label: t('manager.cards.throughput', { defaultValue: 'Rate' }),
+                    label: t('manager.cards.throughput'),
                     value: `${formatNumber(throughput)}/s`,
                   },
                   {
-                    label: t('manager.cards.errors', { defaultValue: 'Errors' }),
+                    label: t('manager.cards.errors'),
                     value: formatNumber(errorCount),
                     tone: errorCount > 0 ? 'danger' : 'default',
                   },

@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"testing"
+	"time"
 
 	"github.com/foden/cdc/internal/core/ports"
 )
@@ -43,5 +44,20 @@ func TestViewDashboardAggregatesFlowStats(t *testing.T) {
 	dashboard := view.Dashboard()
 	if dashboard.TotalSyncedEvents != 4 {
 		t.Fatalf("TotalSyncedEvents = %d, want 4", dashboard.TotalSyncedEvents)
+	}
+}
+
+func TestViewDashboardFallbackLatencyUsesMaxReplicationLag(t *testing.T) {
+	reg := NewRegistry()
+	metrics := NewMetrics()
+	view := NewView(reg, metrics, nil)
+
+	now := time.Now().UnixMilli()
+	metrics.RecordSinkWrite("flow-fast", "source-1", "sink-1", 1, 10, now-100)
+	metrics.RecordSinkWrite("flow-slow", "source-1", "sink-1", 1, 10, now-2000)
+
+	dashboard := view.Dashboard()
+	if dashboard.LatencyP99 < 1800 {
+		t.Fatalf("LatencyP99 fallback = %.0f, want max lag near 2000ms", dashboard.LatencyP99)
 	}
 }

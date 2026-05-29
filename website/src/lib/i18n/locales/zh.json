@@ -2,6 +2,7 @@
   "nav": {
     "dashboard": "仪表盘",
     "explorer": "数据探索",
+    "overview": "概览",
     "topics": "主题",
     "consumers": "消费者",
     "messages": "消息",
@@ -9,7 +10,9 @@
     "manager": "连接器管理",
     "sources": "数据源",
     "sinks": "目标端",
-    "flows": "同步任务"
+    "flows": "同步任务",
+    "toggleSidebar": "切换侧边栏",
+    "breadcrumb": "面包屑导航"
   },
   "dashboard": {
     "title": "仪表盘",
@@ -140,6 +143,50 @@
     "originalSubject": "Original subject",
     "reason": "原因",
     "dlqClean": "DLQ 为空。",
+    "overviewTitle": "数据探索",
+    "overviewDesc": "查看 CDC 流健康、积压和失败消息恢复的入口。",
+    "topicsNeedingAttention": "需要关注的 Topics",
+    "noTopicsNeedAttention": "没有需要关注的 topic。",
+    "recentDlq": "最近 DLQ",
+    "replayRisk": "{{risk}} 风险",
+    "noFilterSubjects": "未报告 filter subject。",
+    "recentMessages": "最近消息",
+    "noRecentMessages": "暂无最近消息。",
+    "subject": "Subject",
+    "operation": "操作",
+    "latestSequence": "最新 Sequence",
+    "messageTimeline": "消息时间线",
+    "lagAndCheckpoints": "积压与 Checkpoint",
+    "delivered": "Delivered",
+    "noCheckpointContext": "该 partition 暂无 checkpoint 上下文。",
+    "keyOrId": "Key/ID",
+    "markers": "标记",
+    "before": "变更前",
+    "after": "变更后",
+    "confirmDlqReprocess": "确认重处理 DLQ",
+    "dlqPreviewSummary": "预览发现 {{count}} 条消息，{{blocked}} 条被阻止。",
+    "reprocessSelected": "重处理所选",
+    "previewSelected": "预览 {{count}}",
+    "previewDlqFailed": "DLQ 重处理预览失败",
+    "filter": {
+      "allOps": "全部操作",
+      "create": "创建",
+      "update": "更新",
+      "delete": "删除",
+      "sequenceMin": "Seq min",
+      "sequenceMax": "Seq max",
+      "payloadContains": "Payload 包含",
+      "sort": "排序",
+      "newest": "最新",
+      "oldest": "最旧",
+      "clear": "清除",
+      "headerKey": "Header key",
+      "headerValue": "Header value",
+      "jsonPath": "JSON path",
+      "jsonEquals": "JSON equals",
+      "fromMs": "起始 ms",
+      "toMs": "结束 ms"
+    },
     "status": {
       "sent": "已发送",
       "dlq": "DLQ",
@@ -154,6 +201,7 @@
       "usedByFlows": "{{count}} 个流程",
       "unused": "未使用",
       "events": "事件",
+      "throughput": "吞吐",
       "written": "已写入",
       "errors": "错误",
       "filterOn": "已启用过滤",
@@ -169,6 +217,8 @@
       "testSuccess": "连接测试成功！",
       "testFailed": "连接测试失败",
       "addDesc": "定义将源事件流式传输到 NATS 流中的属性。",
+      "createDesc": "注册数据库连接作为 CDC 数据源。",
+      "editDesc": "更新此数据源的数据库连接信息。",
       "fields": {
         "instanceId": "实例 ID",
         "displayName": "显示名称（选填）",
@@ -193,6 +243,10 @@
       "placeholders": {
         "instanceId": "例如 pg_prod",
         "displayName": "例如 生产 Postgres",
+        "host": "localhost",
+        "database": "my_database",
+        "password": "password",
+        "editPassword": "••••••••",
         "topic": "例如 cdc.postgres",
         "tablesList": "例如 public.users, public.orders",
         "headers": "{ \"Authorization\": \"Bearer token_here\" }"
@@ -248,6 +302,8 @@
       "testSuccess": "连接测试成功！",
       "testFailed": "连接测试失败",
       "addDesc": "定义用于将数据写入数据库、Elasticsearch、webhook 或控制台目标的属性。",
+      "createDesc": "注册用于写入 CDC 数据的目标连接。",
+      "editDesc": "更新此目标端的数据库连接信息。",
       "fields": {
         "instanceId": "实例 ID",
         "displayName": "显示名称（选填）",
@@ -272,6 +328,10 @@
       "placeholders": {
         "instanceId": "例如 es_sink_dev",
         "displayName": "例如 分析 Elasticsearch",
+        "host": "localhost",
+        "database": "my_database",
+        "password": "password",
+        "editPassword": "••••••••",
         "topic": "例如 cdc.postgres",
         "esUrls": "例如 http://localhost:9200, http://elasticsearch:9200",
         "index": "cdc-events",
@@ -409,7 +469,14 @@
         "lag": "复制延迟",
         "lagDesc": "偏移延迟: {{lag}}毫秒",
         "eventsSynced": "已同步事件数",
-        "eventsSyncedDesc": "累计同步记录数"
+        "eventsSyncedDesc": "累计同步记录数",
+        "failures": "失败",
+        "failuresDesc": "目标端写入失败或映射错误",
+        "workers": "Workers",
+        "workersDesc": "工作池利用率 {{value}}",
+        "filtered": "已过滤",
+        "dlq": "DLQ",
+        "lastError": "最近错误"
       },
       "detail": {
         "columnSchema": "字段映射架构",
@@ -424,7 +491,8 @@
         "batchSize": "批次大小",
         "flushInterval": "刷新间隔",
         "partitionCount": "分区数量",
-        "filterExpression": "CEL 过滤表达式"
+        "filterExpression": "CEL 过滤表达式",
+        "noMappings": "未配置字段映射。"
       },
       "table": {
         "active": "启用",
@@ -462,6 +530,7 @@
     "seconds": "秒",
     "save": "保存",
     "cancel": "取消",
+    "close": "关闭",
     "create": "创建",
     "delete": "删除",
     "actions": "操作",
@@ -478,11 +547,13 @@
     "refresh": "刷新配置"
   },
   "theme": {
+    "label": "主题",
     "light": "浅色",
     "dark": "深色",
     "system": "系统"
   },
   "language": {
+    "label": "语言",
     "en": "English",
     "vi": "Tiếng Việt",
     "zh": "中文"

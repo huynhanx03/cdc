@@ -220,8 +220,8 @@ export function FlowWizard({ open, onOpenChange }: FlowWizardProps) {
       toast.success(t("common.success"));
       resetForm();
       onOpenChange(false);
-    } catch (err: any) {
-      toast.error(err.message || t("manager.flows.createFailed"));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t("manager.flows.createFailed"));
     }
   };
 
@@ -500,7 +500,7 @@ export function FlowWizard({ open, onOpenChange }: FlowWizardProps) {
 
                       const updateMapping = (
                         key: keyof ColumnMapping,
-                        val: any,
+                        val: ColumnMapping[keyof ColumnMapping],
                       ) => {
                         const next = [...columnMappings];
                         next[idx] = { ...next[idx], [key]: val };

@@ -2,6 +2,7 @@
   "nav": {
     "dashboard": "Dashboard",
     "explorer": "Explorer",
+    "overview": "Overview",
     "topics": "Topics",
     "consumers": "Consumers",
     "messages": "Messages",
@@ -9,7 +10,9 @@
     "manager": "Manager",
     "sources": "Sources",
     "sinks": "Sinks",
-    "flows": "Flows"
+    "flows": "Flows",
+    "toggleSidebar": "Toggle sidebar",
+    "breadcrumb": "Breadcrumb"
   },
   "dashboard": {
     "title": "Dashboard",
@@ -140,6 +143,50 @@
     "originalSubject": "Original Subject",
     "reason": "Reason",
     "dlqClean": "DLQ is clean.",
+    "overviewTitle": "Explorer",
+    "overviewDesc": "CDC stream health, lag, and failed-message recovery entrypoint.",
+    "topicsNeedingAttention": "Topics needing attention",
+    "noTopicsNeedAttention": "No topics need attention.",
+    "recentDlq": "Recent DLQ",
+    "replayRisk": "{{risk}} risk",
+    "noFilterSubjects": "No filter subjects reported.",
+    "recentMessages": "Recent messages",
+    "noRecentMessages": "No recent messages.",
+    "subject": "Subject",
+    "operation": "Operation",
+    "latestSequence": "Latest sequence",
+    "messageTimeline": "Message Timeline",
+    "lagAndCheckpoints": "Lag & Checkpoints",
+    "delivered": "Delivered",
+    "noCheckpointContext": "No checkpoint context for this partition.",
+    "keyOrId": "Key/ID",
+    "markers": "Markers",
+    "before": "Before",
+    "after": "After",
+    "confirmDlqReprocess": "Confirm DLQ reprocess",
+    "dlqPreviewSummary": "Preview found {{count}} messages and {{blocked}} blocked items.",
+    "reprocessSelected": "Reprocess selected",
+    "previewSelected": "Preview {{count}}",
+    "previewDlqFailed": "Failed to preview DLQ reprocess",
+    "filter": {
+      "allOps": "All ops",
+      "create": "Create",
+      "update": "Update",
+      "delete": "Delete",
+      "sequenceMin": "Seq min",
+      "sequenceMax": "Seq max",
+      "payloadContains": "Payload contains",
+      "sort": "Sort",
+      "newest": "Newest",
+      "oldest": "Oldest",
+      "clear": "Clear",
+      "headerKey": "Header key",
+      "headerValue": "Header value",
+      "jsonPath": "JSON path",
+      "jsonEquals": "JSON equals",
+      "fromMs": "From ms",
+      "toMs": "To ms"
+    },
     "status": {
       "sent": "SENT",
       "dlq": "DLQ",
@@ -153,6 +200,7 @@
       "usage": "Usage",
       "usedByFlows": "{{count}} flows",
       "unused": "Unused",
+      "throughput": "Rate",
       "events": "Events",
       "written": "Written",
       "errors": "Errors",
@@ -169,6 +217,8 @@
       "testSuccess": "Connection successful!",
       "testFailed": "Connection failed",
       "addDesc": "Define properties for streaming source events into your NATS stream.",
+      "createDesc": "Register a database connection as a CDC source.",
+      "editDesc": "Update the database connection details for this source.",
       "fields": {
         "instanceId": "Instance ID",
         "displayName": "Display Name (Optional)",
@@ -193,6 +243,10 @@
       "placeholders": {
         "instanceId": "e.g. pg_prod",
         "displayName": "e.g. Production Postgres",
+        "host": "localhost",
+        "database": "my_database",
+        "password": "password",
+        "editPassword": "••••••••",
         "topic": "e.g. cdc.postgres",
         "tablesList": "e.g. public.users, public.orders",
         "headers": "{ \"Authorization\": \"Bearer token_here\" }"
@@ -248,6 +302,8 @@
       "testSuccess": "Connection successful!",
       "testFailed": "Connection failed",
       "addDesc": "Define properties for writing data into database, Elasticsearch, webhook, or console targets.",
+      "createDesc": "Register a target database connection as a CDC sink.",
+      "editDesc": "Update the database connection details for this sink.",
       "fields": {
         "instanceId": "Instance ID",
         "displayName": "Display Name (Optional)",
@@ -272,6 +328,10 @@
       "placeholders": {
         "instanceId": "e.g. es_sink_dev",
         "displayName": "e.g. Analytics Elasticsearch",
+        "host": "localhost",
+        "database": "my_database",
+        "password": "password",
+        "editPassword": "••••••••",
         "topic": "e.g. cdc.postgres",
         "esUrls": "e.g. http://localhost:9200, http://elasticsearch:9200",
         "index": "cdc-events",
@@ -409,7 +469,14 @@
         "lag": "Replication Lag",
         "lagDesc": "Offset delay: {{lag}}ms",
         "eventsSynced": "Events Synced",
-        "eventsSyncedDesc": "Accumulated lifetime records"
+        "eventsSyncedDesc": "Accumulated lifetime records",
+        "failures": "Failures",
+        "failuresDesc": "Failed sink writes or mapping errors",
+        "workers": "Workers",
+        "workersDesc": "{{value}} pool utilization",
+        "filtered": "Filtered",
+        "dlq": "DLQ",
+        "lastError": "Last error"
       },
       "detail": {
         "columnSchema": "Column Schema Mappings",
@@ -424,7 +491,8 @@
         "batchSize": "Batch Size",
         "flushInterval": "Flush Interval",
         "partitionCount": "Partition Count",
-        "filterExpression": "Filter Expression (CEL)"
+        "filterExpression": "Filter Expression (CEL)",
+        "noMappings": "No column mappings configured."
       },
       "table": {
         "active": "Active",
@@ -462,6 +530,7 @@
     "seconds": "s",
     "save": "Save",
     "cancel": "Cancel",
+    "close": "Close",
     "create": "Create",
     "delete": "Delete",
     "actions": "Actions",
@@ -478,11 +547,13 @@
     "refresh": "Refresh config"
   },
   "theme": {
+    "label": "Theme",
     "light": "Light",
     "dark": "Dark",
     "system": "System"
   },
   "language": {
+    "label": "Language",
     "en": "English",
     "vi": "Tiếng Việt",
     "zh": "中文"

@@ -29,6 +29,8 @@ import (
 	"github.com/foden/cdc/pkg/utils"
 )
 
+const taskChannelBufferSize = 8192
+
 // mysqlTask represents a row change from binlog
 type mysqlTask struct {
 	op             constant.Op
@@ -79,7 +81,7 @@ func New(cfg *ports.SourceConfig) (*MySQLSource, error) {
 	return &MySQLSource{
 		cfg:             cfg,
 		stop:            make(chan struct{}),
-		taskChan:        make(chan *mysqlTask, 8192),
+		taskChan:        make(chan *mysqlTask, taskChannelBufferSize),
 		runtimeRegistry: coreruntime.DefaultRegistry(),
 		runtimeMetrics:  coreruntime.DefaultMetrics(),
 	}, nil
@@ -355,7 +357,7 @@ func (s *MySQLSource) processTask(t *mysqlTask) {
 	if s.runtimeMetrics != nil {
 		s.runtimeMetrics.RecordSourceProduced(s.cfg.InstanceID, t.db, t.table.Name, 1, t.ts)
 	}
-	metrics.EventsProducedTotal.WithLabelValues(s.cfg.InstanceID, "success").Inc()
+	metrics.EventsProducedTotal.WithLabelValues(s.cfg.InstanceID, metrics.StatusSuccess).Inc()
 }
 
 // calculatePartition hashes the Primary Key of the row to determine the destination partition.

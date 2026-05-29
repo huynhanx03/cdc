@@ -167,9 +167,39 @@ service CDCService {
   }
 
   // Explorer API
+  rpc GetExplorerOverview(GetExplorerOverviewRequest) returns (GetExplorerOverviewResponse) {
+    option (google.api.http) = {
+      get : "/api/v1/explorer/overview"
+    };
+  }
+
   rpc ListMessages(ListMessagesRequest) returns (ListMessagesResponse) {
     option (google.api.http) = {
       get : "/api/v1/messages"
+    };
+  }
+
+  rpc GetTopicDetail(GetTopicDetailRequest) returns (GetTopicDetailResponse) {
+    option (google.api.http) = {
+      get : "/api/v1/topics/{topic}"
+    };
+  }
+
+  rpc GetPartitionDetail(GetPartitionDetailRequest) returns (GetPartitionDetailResponse) {
+    option (google.api.http) = {
+      get : "/api/v1/topics/{topic}/partitions/{partition}"
+    };
+  }
+
+  rpc ListPartitionMessages(ListPartitionMessagesRequest) returns (ListPartitionMessagesResponse) {
+    option (google.api.http) = {
+      get : "/api/v1/topics/{topic}/partitions/{partition}/messages"
+    };
+  }
+
+  rpc GetMessageDetail(GetMessageDetailRequest) returns (GetMessageDetailResponse) {
+    option (google.api.http) = {
+      get : "/api/v1/topics/{topic}/partitions/{partition}/messages/{sequence}"
     };
   }
 
@@ -182,6 +212,12 @@ service CDCService {
   rpc ListConsumers(ListConsumersRequest) returns (ListConsumersResponse) {
     option (google.api.http) = {
       get : "/api/v1/consumers"
+    };
+  }
+
+  rpc GetConsumerDetail(GetConsumerDetailRequest) returns (GetConsumerDetailResponse) {
+    option (google.api.http) = {
+      get : "/api/v1/consumers/{consumer_name}"
     };
   }
 
@@ -204,9 +240,17 @@ service CDCService {
     };
   }
 
+  rpc PreviewDLQReprocess(PreviewDLQReprocessRequest) returns (PreviewDLQReprocessResponse) {
+    option (google.api.http) = {
+      post : "/api/v1/dlq/reprocess/preview"
+      body : "*"
+    };
+  }
+
   rpc ReprocessDLQ(ReprocessDLQRequest) returns (ReprocessDLQResponse) {
     option (google.api.http) = {
       post : "/api/v1/dlq/reprocess"
+      body : "*"
     };
   }
 }

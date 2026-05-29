@@ -28,6 +28,9 @@ var (
 	// ErrValidation is returned for actionable user input errors.
 	ErrValidation = errors.New("validation error")
 
+	// ErrNotFound is returned when a requested resource does not exist.
+	ErrNotFound = errors.New("not found")
+
 	// ErrNonRetryable wraps errors that should not be retried.
 	// Retry frameworks should check IsNonRetryable() and fail fast.
 	ErrNonRetryable = errors.New("non-retryable error")

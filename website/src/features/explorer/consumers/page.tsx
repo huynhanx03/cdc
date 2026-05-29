@@ -1,9 +1,10 @@
 import { useMemo } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { RefreshCw, RadioTower, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
+import { ROUTES } from '@/config/routes';
 import {
   Table,
   TableBody,
@@ -13,10 +14,12 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { useConsumers } from '@/lib/query/explorer';
-import { formatCount, StatusBadge } from '../shared';
+import { StatusBadge } from '../components/StatusBadge';
+import { formatCount } from '../shared';
 
 export default function ExplorerConsumersPage() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const topicFilter = searchParams.get('topic') || '';
   const { data, isLoading, isFetching, refetch } = useConsumers(1, 100);
@@ -89,7 +92,11 @@ export default function ExplorerConsumersPage() {
                 const ackPending = consumer.num_ack_pending ?? 0;
                 const lagging = pending > 0 || ackPending > 0;
                 return (
-                  <TableRow key={consumer.name}>
+                  <TableRow
+                    key={consumer.name}
+                    className="cursor-pointer"
+                    onClick={() => navigate(ROUTES.EXPLORER_CONSUMER_DETAIL.replace(':consumer', encodeURIComponent(consumer.name)))}
+                  >
                     <TableCell className="font-mono text-xs font-semibold">{consumer.name}</TableCell>
                     <TableCell>
                       <div className="space-y-1">

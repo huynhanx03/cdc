@@ -41,10 +41,10 @@ export function formatDuration(totalSeconds: NumericValue): string {
   const seconds = Math.floor(value % 60);
 
   const parts: string[] = [];
-  if (days > 0) parts.push(`${days}${i18n.t('common.days', { defaultValue: 'd' })}`);
-  if (hours > 0) parts.push(`${hours}${i18n.t('common.hours', { defaultValue: 'h' })}`);
-  if (minutes > 0) parts.push(`${minutes}${i18n.t('common.minutes', { defaultValue: 'm' })}`);
-  if (parts.length === 0) parts.push(`${seconds}${i18n.t('common.seconds', { defaultValue: 's' })}`);
+  if (days > 0) parts.push(`${days}${i18n.t('common.days')}`);
+  if (hours > 0) parts.push(`${hours}${i18n.t('common.hours')}`);
+  if (minutes > 0) parts.push(`${minutes}${i18n.t('common.minutes')}`);
+  if (parts.length === 0) parts.push(`${seconds}${i18n.t('common.seconds')}`);
 
   return parts.join(' ');
 }
